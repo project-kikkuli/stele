@@ -4,8 +4,8 @@
 //!   .claude/settings.json      Claude Code: Stop + UserPromptSubmit hooks
 //!   .codex/hooks.json          Codex CLI: same contract
 //!   .devin/hooks.v1.json       Devin CLI: same contract
-//!   .cursor/hooks.json         Cursor IDE (headless CLI: use `stele wrap`)
-//!   .stele/hermes-shim.sh      Hermes: self-scoping global shim (+ `stele install hermes`)
+//!   .cursor/hooks.json         Cursor IDE (headless CLI: use `stele run cursor`)
+//!   .stele/hermes-shim.sh      Hermes: self-scoping global shim
 //!   .git/hooks/pre-push        environment floor, fast local wall
 //!   .github/workflows/stele.yml   CI: the unbypassable terminus, fail-loud
 //!   AGENTS.md                  generated exhortation section (managed block)
@@ -17,7 +17,7 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::{self, Rule};
 
@@ -211,7 +211,8 @@ fn read_json_or(path: &Path, default: Value) -> Result<Value, String> {
 }
 
 /// Hermes hooks are global-only (~/.hermes/config.yaml), so the repo carries a
-/// self-scoping shim; `stele install hermes` wires it globally once per user.
+/// self-scoping shim. `stele install global` wires the user-level copy when
+/// Hermes is detected.
 fn write_hermes_shim(root: &Path, written: &mut Vec<String>) -> Result<(), String> {
     let shim = root.join(".stele/hermes-shim.sh");
     write_file(&shim, HERMES_SHIM_BODY, written)?;
@@ -355,15 +356,24 @@ fn make_executable(path: &Path) {
 
 /// Install user-level hooks. These evaluate only system + personal rules;
 /// repository-generated hooks evaluate only repository rules, so both layers
-/// can coexist without duplicate findings.
+/// can coexist without duplicate findings. Hermes is included automatically
+/// when ~/.hermes/config.yaml exists.
 pub fn install_global() -> Result<Vec<String>, String> {
     let home = std::env::var("HOME").map_err(|_| "no $HOME")?;
-    install_global_at(Path::new(&home))
+    let state_dir = config::user_config_path()?
+        .parent()
+        .ok_or("personal config has no parent directory")?
+        .to_path_buf();
+    install_global_with_state(Path::new(&home), &state_dir)
 }
 
 /// Path-injectable implementation used by integration tests and managed
 /// installers that stage a home directory before deployment.
 pub fn install_global_at(home: &Path) -> Result<Vec<String>, String> {
+    install_global_with_state(home, &home.join(".config/stele"))
+}
+
+fn install_global_with_state(home: &Path, state_dir: &Path) -> Result<Vec<String>, String> {
     // Validate every existing user file before the first write so a malformed
     // config cannot leave the multi-harness install half-applied.
     read_json_or(&home.join(".claude/settings.json"), json!({}))?;
@@ -372,6 +382,7 @@ pub fn install_global_at(home: &Path) -> Result<Vec<String>, String> {
         &home.join(".cursor/hooks.json"),
         json!({"version": 1, "hooks": {}}),
     )?;
+    let hermes = prepare_hermes_install(home, state_dir)?;
 
     let mut written = Vec::new();
     merge_claude_style(
@@ -389,12 +400,14 @@ pub fn install_global_at(home: &Path) -> Result<Vec<String>, String> {
         &mut written,
     )?;
     write_cursor(&home.join(".cursor/hooks.json"), "global", &mut written)?;
+    if let Some(update) = hermes {
+        apply_hermes_install(update, &mut written)?;
+    }
     Ok(written)
 }
 
-/// `stele install hermes` — install a stable user-level shim and patch
-/// ~/.hermes/config.yaml. Handles the `hooks: {}` stub (a naive append would
-/// create a duplicate YAML key that silently loses — found the hard way).
+/// Compatibility entrypoint. New callers should use `stele install global`,
+/// which detects and wires Hermes with every other user harness.
 pub fn install_hermes() -> Result<(), String> {
     let home = std::env::var("HOME").map_err(|_| "no $HOME")?;
     let state_dir = config::user_config_path()?
@@ -405,49 +418,389 @@ pub fn install_hermes() -> Result<(), String> {
 }
 
 pub fn install_hermes_at(home: &Path, state_dir: &Path) -> Result<(), String> {
-    let config = home.join(".hermes/config.yaml");
-    let shim = state_dir.join("hermes-shim.sh");
-    let mut ignored = Vec::new();
-    write_file(&shim, HERMES_SHIM_BODY, &mut ignored)?;
-    make_executable(&shim);
-    let text = fs::read_to_string(&config).map_err(|e| format!("{}: {e}", config.display()))?;
-    let entry = format!(
-        "hooks:\n  pre_tool_call:\n    - command: \"{} pre_tool_call\"\n      timeout: 60",
-        shim.display()
-    );
-    if text.contains(&shim.display().to_string()) {
-        println!("hermes already wired to the personal Stele shim");
-        return Ok(());
-    }
-    let backup = config.with_extension("yaml.stele-backup");
-    fs::copy(&config, &backup).map_err(|e| format!("backup: {e}"))?;
-    let (migrated, replaced_old_hook) = migrate_hermes_hook(&text, &shim);
-    let updated = if replaced_old_hook {
-        migrated
-    } else if text.contains("\nhooks: {}\n") {
-        text.replace("\nhooks: {}\n", &format!("\n{entry}\n"))
-    } else if !text.lines().any(|l| l.starts_with("hooks:")) {
-        format!("{}\n\n{entry}\n", text.trim_end())
-    } else {
+    let Some(update) = prepare_hermes_install(home, state_dir)? else {
         return Err(format!(
-            "~/.hermes/config.yaml already has a hooks section; add this entry manually:\n{entry}"
+            "{} does not exist; run Hermes setup first",
+            home.join(".hermes/config.yaml").display()
         ));
     };
-    fs::write(&config, updated).map_err(|e| format!("{}: {e}", config.display()))?;
-    println!(
-        "wired hermes pre_tool_call → {} (backup at {})\nnote: consent via HERMES_ACCEPT_HOOKS=1 or `hooks_auto_accept: true`",
-        shim.display(),
-        backup.display()
-    );
+    let mut ignored = Vec::new();
+    apply_hermes_install(update, &mut ignored)
+}
+
+struct HermesInstall {
+    config: PathBuf,
+    shim: PathBuf,
+    original: String,
+    updated: String,
+}
+
+fn prepare_hermes_install(home: &Path, state_dir: &Path) -> Result<Option<HermesInstall>, String> {
+    let config = home.join(".hermes/config.yaml");
+    if !config.is_file() {
+        return Ok(None);
+    }
+    let shim = state_dir.join("hermes-shim.sh");
+    let original = fs::read_to_string(&config).map_err(|e| format!("{}: {e}", config.display()))?;
+    let updated = install_hermes_text(&original, &shim)?;
+    Ok(Some(HermesInstall {
+        config,
+        shim,
+        original,
+        updated,
+    }))
+}
+
+fn apply_hermes_install(update: HermesInstall, written: &mut Vec<String>) -> Result<(), String> {
+    write_file(&update.shim, HERMES_SHIM_BODY, written)?;
+    make_executable(&update.shim);
+    if update.original != update.updated {
+        let backup = update.config.with_extension("yaml.stele-backup");
+        if !backup.exists() {
+            fs::copy(&update.config, &backup).map_err(|e| format!("backup: {e}"))?;
+        }
+        write_file(&update.config, &update.updated, written)?;
+    }
     Ok(())
+}
+
+/// Remove only Stele-owned user hook entries. Personal rules are deliberately
+/// retained so uninstall/reinstall is a cheap, reversible dogfooding switch.
+pub fn uninstall_global() -> Result<Vec<String>, String> {
+    let home = std::env::var("HOME").map_err(|_| "no $HOME")?;
+    let state_dir = config::user_config_path()?
+        .parent()
+        .ok_or("personal config has no parent directory")?
+        .to_path_buf();
+    uninstall_global_with_state(Path::new(&home), &state_dir)
+}
+
+pub fn uninstall_global_at(home: &Path) -> Result<Vec<String>, String> {
+    uninstall_global_with_state(home, &home.join(".config/stele"))
+}
+
+fn uninstall_global_with_state(home: &Path, state_dir: &Path) -> Result<Vec<String>, String> {
+    // Parse every existing JSON document before the first mutation. An
+    // uninstall must be at least as clobber-safe as the installer.
+    for (path, default) in [
+        (home.join(".claude/settings.json"), json!({})),
+        (home.join(".codex/hooks.json"), json!({})),
+        (
+            home.join(".cursor/hooks.json"),
+            json!({"version": 1, "hooks": {}}),
+        ),
+    ] {
+        if path.exists() {
+            read_json_or(&path, default)?;
+        }
+    }
+
+    let hermes_config = home.join(".hermes/config.yaml");
+    let hermes_original = if hermes_config.is_file() {
+        Some(
+            fs::read_to_string(&hermes_config)
+                .map_err(|e| format!("{}: {e}", hermes_config.display()))?,
+        )
+    } else {
+        None
+    };
+
+    let mut written = Vec::new();
+    remove_claude_style(
+        &home.join(".claude/settings.json"),
+        "claude-code",
+        false,
+        &mut written,
+    )?;
+    remove_claude_style(
+        &home.join(".codex/hooks.json"),
+        "codex",
+        false,
+        &mut written,
+    )?;
+    remove_cursor(&home.join(".cursor/hooks.json"), &mut written)?;
+
+    let shim = state_dir.join("hermes-shim.sh");
+    if let Some(original) = hermes_original {
+        let updated = uninstall_hermes_text(&original, &shim);
+        if updated != original {
+            let backup = hermes_config.with_extension("yaml.stele-uninstall-backup");
+            fs::copy(&hermes_config, &backup).map_err(|e| format!("backup: {e}"))?;
+            write_file(&hermes_config, &updated, &mut written)?;
+        }
+    }
+    if fs::read_to_string(&shim)
+        .map(|body| body.contains("stele-owned hook"))
+        .unwrap_or(false)
+    {
+        fs::remove_file(&shim).map_err(|e| format!("{}: {e}", shim.display()))?;
+        written.push(shim.display().to_string());
+    }
+    Ok(written)
+}
+
+fn remove_claude_style(
+    path: &Path,
+    harness: &str,
+    bare: bool,
+    written: &mut Vec<String>,
+) -> Result<(), String> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let mut doc = read_json_or(path, json!({}))?;
+    let mut changed = false;
+    let hooks_empty;
+    {
+        let hooks = if bare {
+            &mut doc
+        } else {
+            let Some(hooks) = doc.get_mut("hooks") else {
+                return Ok(());
+            };
+            hooks
+        };
+        let object = hooks.as_object_mut().ok_or("hooks is not an object")?;
+        let events: Vec<String> = object.keys().cloned().collect();
+        for event in events {
+            let Some(arr) = object.get_mut(&event).and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for group in arr.iter_mut() {
+                let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                    continue;
+                };
+                let before = handlers.len();
+                let prefix = format!("stele hook {harness} ");
+                handlers.retain(|handler| {
+                    !handler["command"]
+                        .as_str()
+                        .is_some_and(|command| command.starts_with(&prefix))
+                });
+                changed |= handlers.len() != before;
+            }
+            arr.retain(|group| {
+                group["hooks"]
+                    .as_array()
+                    .is_none_or(|handlers| !handlers.is_empty())
+            });
+            if arr.is_empty() {
+                object.remove(&event);
+            }
+        }
+        hooks_empty = object.is_empty();
+    }
+    if !changed {
+        return Ok(());
+    }
+    if !bare && hooks_empty {
+        doc.as_object_mut()
+            .ok_or("settings is not an object")?
+            .remove("hooks");
+    }
+    write_file(
+        path,
+        &format!("{}\n", serde_json::to_string_pretty(&doc).unwrap()),
+        written,
+    )
+}
+
+fn remove_cursor(path: &Path, written: &mut Vec<String>) -> Result<(), String> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let mut doc = read_json_or(path, json!({"version": 1, "hooks": {}}))?;
+    let mut changed = false;
+    let mut hooks_empty = false;
+    if let Some(hooks) = doc.get_mut("hooks") {
+        let object = hooks.as_object_mut().ok_or("hooks is not an object")?;
+        let events: Vec<String> = object.keys().cloned().collect();
+        for event in events {
+            let Some(arr) = object.get_mut(&event).and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let before = arr.len();
+            arr.retain(|entry| {
+                !entry["command"]
+                    .as_str()
+                    .is_some_and(|command| command.starts_with("stele hook cursor "))
+            });
+            changed |= arr.len() != before;
+            if arr.is_empty() {
+                object.remove(&event);
+            }
+        }
+        hooks_empty = object.is_empty();
+    }
+    if !changed {
+        return Ok(());
+    }
+    if hooks_empty {
+        doc.as_object_mut()
+            .ok_or("cursor config is not an object")?
+            .remove("hooks");
+    }
+    write_file(
+        path,
+        &format!("{}\n", serde_json::to_string_pretty(&doc).unwrap()),
+        written,
+    )
+}
+
+fn install_hermes_text(text: &str, shim: &Path) -> Result<String, String> {
+    if text.contains(&shim.display().to_string()) {
+        return Ok(text.to_string());
+    }
+    let (migrated, replaced_old_hook) = migrate_hermes_hook(text, shim);
+    if replaced_old_hook {
+        return Ok(migrated);
+    }
+
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let trailing_newline = text.ends_with('\n');
+    let entry = hermes_entry(shim);
+
+    if let Some(index) = lines
+        .iter()
+        .position(|line| yaml_indent(line) == 0 && line.trim() == "hooks: {}")
+    {
+        lines.splice(index..=index, entry);
+        return Ok(join_yaml(lines, trailing_newline));
+    }
+
+    let Some(hooks) = lines
+        .iter()
+        .position(|line| yaml_indent(line) == 0 && line.trim() == "hooks:")
+    else {
+        if lines
+            .iter()
+            .any(|line| yaml_indent(line) == 0 && line.trim_start().starts_with("hooks:"))
+        {
+            return Err("~/.hermes/config.yaml uses an unsupported inline hooks value".into());
+        }
+        let mut updated = text.trim_end().to_string();
+        if !updated.is_empty() {
+            updated.push_str("\n\n");
+        }
+        updated.push_str(&entry.join("\n"));
+        updated.push('\n');
+        return Ok(updated);
+    };
+
+    let hooks_end = yaml_section_end(&lines, hooks, 0);
+    if let Some(pretool) = (hooks + 1..hooks_end).find(|&index| {
+        yaml_indent(&lines[index]) == 2
+            && matches!(
+                lines[index].trim(),
+                "pre_tool_call:" | "pre_tool_call: {}" | "pre_tool_call: []"
+            )
+    }) {
+        if lines[pretool].trim() != "pre_tool_call:" {
+            lines[pretool] = "  pre_tool_call:".to_string();
+        }
+        let insert = yaml_section_end(&lines, pretool, 2);
+        lines.splice(insert..insert, entry.into_iter().skip(2));
+    } else {
+        lines.splice(hooks_end..hooks_end, entry.into_iter().skip(1));
+    }
+    Ok(join_yaml(lines, trailing_newline))
+}
+
+fn hermes_entry(shim: &Path) -> Vec<String> {
+    let path = shim.display().to_string().replace('"', "\\\"");
+    vec![
+        "hooks:".to_string(),
+        "  pre_tool_call:".to_string(),
+        format!("    - command: \"{path} pre_tool_call\""),
+        "      timeout: 60".to_string(),
+    ]
+}
+
+fn uninstall_hermes_text(text: &str, shim: &Path) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let trailing_newline = text.ends_with('\n');
+    let mut index = 0;
+    while index < lines.len() {
+        let trimmed = lines[index].trim_start();
+        if trimmed.starts_with("- command:") && owned_hermes_command(&lines[index], shim) {
+            let indent = yaml_indent(&lines[index]);
+            let mut end = index + 1;
+            while end < lines.len() {
+                let candidate = &lines[end];
+                if !candidate.trim().is_empty() && yaml_indent(candidate) <= indent {
+                    break;
+                }
+                end += 1;
+            }
+            lines.drain(index..end);
+            continue;
+        }
+        index += 1;
+    }
+
+    // Clean up a now-empty Stele-created pre_tool_call section, then the
+    // containing hooks section. Unrelated hook entries and comments survive.
+    if let Some(hooks) = lines
+        .iter()
+        .position(|line| yaml_indent(line) == 0 && line.trim() == "hooks:")
+    {
+        let hooks_end = yaml_section_end(&lines, hooks, 0);
+        if let Some(pretool) = (hooks + 1..hooks_end)
+            .find(|&i| yaml_indent(&lines[i]) == 2 && lines[i].trim() == "pre_tool_call:")
+        {
+            let pretool_end = yaml_section_end(&lines, pretool, 2);
+            if lines[pretool + 1..pretool_end]
+                .iter()
+                .all(|line| line.trim().is_empty())
+            {
+                lines.drain(pretool..pretool_end);
+            }
+        }
+        let hooks_end = yaml_section_end(&lines, hooks, 0);
+        if lines[hooks + 1..hooks_end]
+            .iter()
+            .all(|line| line.trim().is_empty())
+        {
+            lines.splice(hooks..hooks_end, ["hooks: {}".to_string()]);
+        }
+    }
+    join_yaml(lines, trailing_newline)
+}
+
+fn owned_hermes_command(line: &str, shim: &Path) -> bool {
+    line.contains(&shim.display().to_string())
+        || line.contains("stele hook hermes pre_tool_call")
+        || line.contains(".stele/hermes-shim.sh")
+        || line.contains("/stele/hermes-shim.sh")
+        || line.contains("personal-stele/hermes-shim.sh")
+}
+
+fn yaml_indent(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
+}
+
+fn yaml_section_end(lines: &[String], start: usize, indent: usize) -> usize {
+    (start + 1..lines.len())
+        .find(|&index| {
+            let line = lines[index].trim();
+            !line.is_empty() && !line.starts_with('#') && yaml_indent(&lines[index]) <= indent
+        })
+        .unwrap_or(lines.len())
+}
+
+fn join_yaml(lines: Vec<String>, trailing_newline: bool) -> String {
+    let mut text = lines.join("\n");
+    if trailing_newline || !text.is_empty() {
+        text.push('\n');
+    }
+    text
 }
 
 fn migrate_hermes_hook(text: &str, shim: &Path) -> (String, bool) {
     let mut replaced = false;
     let mut lines = Vec::new();
     for line in text.lines() {
-        let old_stele_hook = line.contains(".stele/hermes-shim.sh")
-            || line.contains("stele hook hermes pre_tool_call");
+        let old_stele_hook = owned_hermes_command(line, shim);
         if line.trim_start().starts_with("- command:") && old_stele_hook {
             let indent = &line[..line.len() - line.trim_start().len()];
             lines.push(format!(

@@ -1,5 +1,32 @@
 # Conformance validation results
 
+## 2026-07-17 — reversible personal install and ergonomic launcher
+
+Personal dogfooding now has one symmetric lifecycle:
+
+- `stele install global` creates the personal worktree policy when absent and
+  wires Claude Code, Codex, Cursor IDE, and detected Hermes in one pass.
+- `stele uninstall global` removes only Stele-owned entries; `--purge` also
+  removes the personal rule file.
+- `stele run <agent>` creates or reuses a linked worktree. For Cursor headless,
+  `stele run cursor '<task>'` selects the synthesized resume-loop internally.
+
+Live Cursor result on `cursor-agent 2026.07.16-899851b`:
+
+| harness | result | detail |
+|---|---|---|
+| cursor-run | PASS | managed linked worktree reused; repository rule corrected; synthetic stop fired; green ✓ |
+
+A separate native-hook smoke run against that same Cursor build completed
+successfully but emitted **zero** project-hook events. This reconfirms that the
+external adapter is still necessary even though current Cursor documentation
+describes CLI hook support. The normal command now hides that discrepancy.
+
+The deterministic suite has 51 integration tests covering managed worktree
+creation/reuse, automatic Cursor adapter selection, one-command bootstrap,
+Hermes merge behavior, merge-safe uninstall, purge, idempotence, and rollback
+when an existing user hook file is invalid.
+
 ## 2026-07-17 — layered personal/system rules and session preflight
 
 Live sweep after adding system + personal + repository rule layers, scoped

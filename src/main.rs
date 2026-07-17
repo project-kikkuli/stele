@@ -1,4 +1,6 @@
-use stele::{ack, compile, config, conformance, devin, doctor, engine, hook, substrate, wrap};
+use stele::{
+    ack, compile, config, conformance, devin, doctor, engine, hook, launch, substrate, wrap,
+};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -38,7 +40,24 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = HookScope::All)]
         scope: HookScope,
     },
+    /// Launch an agent in a managed linked worktree with the right Stele adapter.
+    Run {
+        /// Agent executable or alias: codex, claude, cursor, hermes, or any command.
+        agent: String,
+        /// Optional initial prompt. Cursor prompts use the synthetic stop-loop automatically.
+        prompt: Option<String>,
+        /// Stable suffix for the worktree and branch (generated when omitted).
+        #[arg(long)]
+        name: Option<String>,
+        /// Maximum synthetic Cursor stop blocks before giving up.
+        #[arg(long, default_value_t = 2)]
+        max_loops: u32,
+        /// Extra agent arguments after `--`.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Synthesized stop-loop for hook-less CLIs (validated: cursor-agent).
+    #[command(hide = true)]
     Wrap {
         /// The task prompt to give the agent on the first run.
         #[arg(long)]
@@ -54,8 +73,16 @@ enum Cmd {
     Compile,
     /// Install user-level Stele hook wiring.
     Install {
-        /// `global` (Claude/Codex/Cursor) or `hermes`.
+        /// `global` wires every detected user harness. `hermes` is a legacy alias.
         harness: String,
+    },
+    /// Remove Stele-owned user hook wiring without touching anyone else's hooks.
+    Uninstall {
+        /// Currently `global`.
+        harness: String,
+        /// Also remove the personal rule file. System policy is never removed.
+        #[arg(long)]
+        purge: bool,
     },
     /// Acknowledge an intentional red: records a `Stele-Ack:` commit trailer
     /// so the rule reports as acknowledged and stops gating for this branch.
@@ -69,7 +96,7 @@ enum Cmd {
     Doctor,
     /// Drive real installed harnesses against a throwaway fixture end-to-end.
     Conformance {
-        /// Harnesses to run (default: all installed): claude-code codex codex-global cursor-wrap hermes git-pre-push
+        /// Harnesses to run (default: all installed): claude-code codex codex-global cursor-run hermes git-pre-push
         harnesses: Vec<String>,
     },
     /// Cloud Devin: `setup` prints snapshot wiring; `watch <session-id>`
@@ -132,7 +159,7 @@ description = "agents always work in linked git worktrees"
 severity = "block"
 trigger = "always"
 acknowledge = false
-message = "Create a linked worktree (`git worktree add ../<name> -b <branch>`) and relaunch the agent from that directory."
+message = "Launch with `stele run <agent> [prompt]`, or create a linked worktree manually and relaunch there."
 check = '''
 git_dir=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) || exit 1
 common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 1
@@ -151,7 +178,7 @@ description = "agents always work in linked git worktrees"
 severity = "block"
 trigger = "always"
 acknowledge = false
-message = "Create a linked worktree (`git worktree add ../<name> -b <branch>`) and relaunch the agent from that directory."
+message = "Launch with `stele run <agent> [prompt]`, or create a linked worktree manually and relaunch there."
 check = '''
 git_dir=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) || exit 1
 common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 1
@@ -172,6 +199,17 @@ fn main() -> ExitCode {
             event,
             scope,
         } => ExitCode::from(hook::run(&harness, &event, scope.into()) as u8),
+        Cmd::Run {
+            agent,
+            prompt,
+            name,
+            max_loops,
+            args,
+        } => {
+            ExitCode::from(
+                launch::run(&agent, prompt.as_deref(), &args, max_loops, name.as_deref()) as u8,
+            )
+        }
         Cmd::Wrap {
             prompt,
             max_loops,
@@ -179,6 +217,7 @@ fn main() -> ExitCode {
         } => ExitCode::from(wrap::run(max_loops, &prompt, &cmd) as u8),
         Cmd::Compile => run_compile(),
         Cmd::Install { harness } => run_install(&harness),
+        Cmd::Uninstall { harness, purge } => run_uninstall(&harness, purge),
         Cmd::Ack { rule_id, message } => run_ack(&rule_id, &message),
         Cmd::Doctor => ExitCode::from(doctor::run() as u8),
         Cmd::Conformance { harnesses } => ExitCode::from(conformance::run(&harnesses) as u8),
@@ -378,10 +417,8 @@ fn run_compile() -> ExitCode {
                 println!("  {w}");
             }
             println!("\nchannels: claude-code ✓  codex ✓  devin-cli ✓  cursor-ide ✓  git pre-push ✓  ci ✓  AGENTS.md ✓");
-            println!("hermes: run `stele install hermes` once per user");
-            println!(
-                "cursor headless: use `stele wrap --prompt '<task>' -- cursor-agent -p --force`"
-            );
+            println!("hermes: `stele install global` wires it when installed");
+            println!("cursor headless: use `stele run cursor '<task>'`");
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -401,13 +438,26 @@ fn run_install(harness: &str) -> ExitCode {
             }
         };
         let system_config = config::system_config_path();
+        let mut bootstrapped = false;
         if !user_config.is_file() && !system_config.is_file() {
-            eprintln!(
-                "stele install global: no personal config at {} or system config at {} (run `stele init --global`)",
-                user_config.display(),
-                system_config.display()
-            );
-            return ExitCode::from(2);
+            if let Some(parent) = user_config.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "stele install global: could not create {}: {e}",
+                        parent.display()
+                    );
+                    return ExitCode::from(2);
+                }
+            }
+            if let Err(e) = std::fs::write(&user_config, GLOBAL_STARTER) {
+                eprintln!(
+                    "stele install global: could not write {}: {e}",
+                    user_config.display()
+                );
+                return ExitCode::from(2);
+            }
+            println!("stele install global: created {}", user_config.display());
+            bootstrapped = true;
         }
         return match compile::install_global() {
             Ok(written) => {
@@ -419,11 +469,23 @@ fn run_install(harness: &str) -> ExitCode {
                         println!("  {path}");
                     }
                 }
-                println!("personal rules: claude-code ✓  codex ✓  cursor-ide ✓");
-                println!("hermes: run `stele install hermes` once");
+                let hermes = std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .is_some_and(|home| home.join(".hermes/config.yaml").is_file());
+                println!(
+                    "personal rules: claude-code ✓  codex ✓  cursor-ide ✓{}",
+                    if hermes { "  hermes ✓" } else { "" }
+                );
+                if !hermes {
+                    println!("hermes: not detected; rerun this command after installing it");
+                }
+                println!("headless agents: `stele run <agent> [prompt]`");
                 ExitCode::SUCCESS
             }
             Err(e) => {
+                if bootstrapped {
+                    let _ = std::fs::remove_file(&user_config);
+                }
                 eprintln!("stele install global: {e}");
                 ExitCode::from(2)
             }
@@ -434,10 +496,59 @@ fn run_install(harness: &str) -> ExitCode {
         return ExitCode::from(2);
     }
     match compile::install_hermes() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            println!("stele install hermes: wired (included by `stele install global`)");
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("stele install hermes: {e}");
             ExitCode::from(2)
         }
     }
+}
+
+fn run_uninstall(harness: &str, purge: bool) -> ExitCode {
+    if harness != "global" {
+        eprintln!("stele uninstall: expected `global`");
+        return ExitCode::from(2);
+    }
+    let changed = match compile::uninstall_global() {
+        Ok(changed) => changed,
+        Err(e) => {
+            eprintln!("stele uninstall global: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if changed.is_empty() {
+        println!("stele uninstall global: no Stele-owned user hooks found");
+    } else {
+        println!("stele uninstall global: removed Stele wiring from");
+        for path in changed {
+            println!("  {path}");
+        }
+    }
+
+    let user_config = match config::user_config_path() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("stele uninstall global: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if purge && user_config.is_file() {
+        if let Err(e) = std::fs::remove_file(&user_config) {
+            eprintln!(
+                "stele uninstall global: could not remove {}: {e}",
+                user_config.display()
+            );
+            return ExitCode::from(2);
+        }
+        println!("removed personal rules at {}", user_config.display());
+    } else if user_config.is_file() {
+        println!(
+            "personal rules retained at {} (use --purge to remove them)",
+            user_config.display()
+        );
+    }
+    ExitCode::SUCCESS
 }

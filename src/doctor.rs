@@ -129,7 +129,7 @@ pub fn run() -> i32 {
             .ok();
         match hermes_cfg.and_then(|p| std::fs::read_to_string(p).ok()) {
             Some(cfg) if cfg.contains("stele") => r.ok("hermes global config wired"),
-            Some(_) => r.warn("hermes installed but not wired — run `stele install hermes`"),
+            Some(_) => r.warn("hermes installed but not wired — rerun `stele install global`"),
             None => r.warn("hermes config not found (skip if you don't use hermes)"),
         }
     }
@@ -171,7 +171,7 @@ fn check_json_path(r: &mut Report, path: &Path, label: &str, harness: &str) {
         Ok(body) if body.contains(&format!("stele hook {harness}")) => {
             r.ok(&format!("{label} wired"));
             if harness == "cursor" {
-                r.warn("cursor: hooks fire in the IDE only — headless runs need `stele wrap`");
+                r.warn("cursor: hooks fire in the IDE only — use `stele run cursor` headless");
             }
         }
         Ok(_) => r.bad(&format!(

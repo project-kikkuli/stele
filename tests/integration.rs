@@ -411,6 +411,7 @@ fn agents_md_managed_block_updates_in_place() {
 fn global_install_preserves_user_config_migrates_old_hooks_and_is_idempotent() {
     let home = TempDir::new().unwrap();
     fs::create_dir_all(home.path().join(".claude")).unwrap();
+    fs::create_dir_all(home.path().join(".hermes")).unwrap();
     fs::write(
         home.path().join(".claude/settings.json"),
         r#"{
@@ -422,6 +423,11 @@ fn global_install_preserves_user_config_migrates_old_hooks_and_is_idempotent() {
     }]
   }
 }"#,
+    )
+    .unwrap();
+    fs::write(
+        home.path().join(".hermes/config.yaml"),
+        "model: test\nhooks:\n  pre_tool_call:\n    - command: \"/usr/local/bin/my-hook\"\n      timeout: 10\n  post_tool_call:\n    - command: \"/usr/local/bin/after\"\n",
     )
     .unwrap();
 
@@ -461,6 +467,59 @@ fn global_install_preserves_user_config_migrates_old_hooks_and_is_idempotent() {
     assert!(codex.contains("session-start --scope global"), "{codex}");
     let cursor = fs::read_to_string(home.path().join(".cursor/hooks.json")).unwrap();
     assert!(cursor.contains("pre-tool-use --scope global"), "{cursor}");
+    let hermes = fs::read_to_string(home.path().join(".hermes/config.yaml")).unwrap();
+    assert!(hermes.contains("/usr/local/bin/my-hook"), "{hermes}");
+    assert!(hermes.contains("/usr/local/bin/after"), "{hermes}");
+    assert!(hermes.contains("hermes-shim.sh pre_tool_call"), "{hermes}");
+    assert!(home.path().join(".config/stele/hermes-shim.sh").is_file());
+}
+
+#[test]
+fn global_uninstall_removes_only_stele_owned_wiring_and_is_idempotent() {
+    let home = TempDir::new().unwrap();
+    fs::create_dir_all(home.path().join(".config/stele")).unwrap();
+    fs::create_dir_all(home.path().join(".claude")).unwrap();
+    fs::create_dir_all(home.path().join(".hermes")).unwrap();
+    let personal = home.path().join(".config/stele/stele.toml");
+    fs::write(
+        &personal,
+        "[[rule]]\nid = \"mine\"\ntrigger = \"always\"\ncheck = \"true\"\n",
+    )
+    .unwrap();
+    fs::write(
+        home.path().join(".claude/settings.json"),
+        r#"{"permissions":{"allow":["Bash(ls)"]},"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"my stop hook"}]}]}}"#,
+    )
+    .unwrap();
+    fs::write(
+        home.path().join(".hermes/config.yaml"),
+        "model: test\nhooks:\n  pre_tool_call:\n    - command: \"/usr/local/bin/my-hook\"\n      timeout: 10\n",
+    )
+    .unwrap();
+
+    stele::compile::install_global_at(home.path()).unwrap();
+    let changed = stele::compile::uninstall_global_at(home.path()).unwrap();
+    assert!(!changed.is_empty());
+    assert!(
+        stele::compile::uninstall_global_at(home.path())
+            .unwrap()
+            .is_empty(),
+        "second uninstall must be a no-op"
+    );
+
+    let claude = fs::read_to_string(home.path().join(".claude/settings.json")).unwrap();
+    assert!(claude.contains("Bash(ls)"), "{claude}");
+    assert!(claude.contains("my stop hook"), "{claude}");
+    assert!(!claude.contains("stele hook"), "{claude}");
+    let codex = fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
+    assert!(!codex.contains("stele hook"), "{codex}");
+    let cursor = fs::read_to_string(home.path().join(".cursor/hooks.json")).unwrap();
+    assert!(!cursor.contains("stele hook"), "{cursor}");
+    let hermes = fs::read_to_string(home.path().join(".hermes/config.yaml")).unwrap();
+    assert!(hermes.contains("/usr/local/bin/my-hook"), "{hermes}");
+    assert!(!hermes.contains("hermes-shim"), "{hermes}");
+    assert!(!home.path().join(".config/stele/hermes-shim.sh").exists());
+    assert!(personal.is_file(), "personal rules are retained by default");
 }
 
 #[test]
@@ -503,6 +562,68 @@ fn global_hook_install_accepts_system_rules_without_personal_config() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(home.path().join(".codex/hooks.json").is_file());
+}
+
+#[test]
+fn global_install_bootstraps_personal_rules_and_uninstall_can_purge_them() {
+    let home = TempDir::new().unwrap();
+    let user = home.path().join("config/stele/stele.toml");
+    let system = home.path().join("missing-system.toml");
+    let install = Command::new(stele_bin())
+        .args(["install", "global"])
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env(config::USER_CONFIG_ENV, &user)
+        .env(config::SYSTEM_CONFIG_ENV, &system)
+        .output()
+        .unwrap();
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let personal = fs::read_to_string(&user).unwrap();
+    assert!(personal.contains("personal-worktree-only"), "{personal}");
+    assert!(home.path().join(".codex/hooks.json").is_file());
+
+    let uninstall = Command::new(stele_bin())
+        .args(["uninstall", "global", "--purge"])
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env(config::USER_CONFIG_ENV, &user)
+        .env(config::SYSTEM_CONFIG_ENV, &system)
+        .output()
+        .unwrap();
+    assert!(
+        uninstall.status.success(),
+        "{}",
+        String::from_utf8_lossy(&uninstall.stderr)
+    );
+    assert!(!user.exists());
+    let codex = fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
+    assert!(!codex.contains("stele hook"), "{codex}");
+}
+
+#[test]
+fn global_install_rolls_back_bootstrap_when_user_hooks_are_invalid() {
+    let home = TempDir::new().unwrap();
+    fs::create_dir_all(home.path().join(".codex")).unwrap();
+    let codex = home.path().join(".codex/hooks.json");
+    fs::write(&codex, "{ invalid\n").unwrap();
+    let user = home.path().join("config/stele/stele.toml");
+    let system = home.path().join("missing-system.toml");
+    let install = Command::new(stele_bin())
+        .args(["install", "global"])
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env(config::USER_CONFIG_ENV, &user)
+        .env(config::SYSTEM_CONFIG_ENV, &system)
+        .output()
+        .unwrap();
+    assert_eq!(install.status.code(), Some(2));
+    assert!(!user.exists(), "failed bootstrap must be rolled back");
+    assert_eq!(fs::read_to_string(codex).unwrap(), "{ invalid\n");
+    assert!(!home.path().join(".claude/settings.json").exists());
 }
 
 #[test]
@@ -850,6 +971,175 @@ fn personal_worktree_rule_blocks_primary_checkout_before_edit_and_passes_linked_
         String::from_utf8_lossy(&check.stdout),
         String::from_utf8_lossy(&check.stderr)
     );
+}
+
+#[test]
+fn stele_run_creates_and_reuses_a_managed_linked_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    sh(
+        &root,
+        "git init -q -b main && git config user.email t@t && git config user.name t",
+    );
+    fs::write(root.join("app.py"), "x = 1\n").unwrap();
+    sh(&root, "git add -A && git commit -qm init");
+
+    let user_config = tmp.path().join("config/stele/stele.toml");
+    let system_config = tmp.path().join("missing-system.toml");
+    let state_home = tmp.path().join("state");
+    let init = global_stele_command(&root, &user_config, &system_config)
+        .args(["init", "--global"])
+        .output()
+        .unwrap();
+    assert!(init.status.success());
+
+    let launched = global_stele_command(&root, &user_config, &system_config)
+        .args(["run", "--name", "dogfood", "pwd"])
+        .env(stele::launch::STATE_HOME_ENV, &state_home)
+        .output()
+        .unwrap();
+    assert!(
+        launched.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&launched.stdout),
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let worktree = PathBuf::from(String::from_utf8_lossy(&launched.stdout).trim());
+    assert!(worktree.is_dir(), "{}", worktree.display());
+    assert_ne!(
+        fs::canonicalize(&worktree).unwrap(),
+        fs::canonicalize(&root).unwrap()
+    );
+    let git_dir = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-dir"])
+        .current_dir(&worktree)
+        .output()
+        .unwrap();
+    let common_dir = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(&worktree)
+        .output()
+        .unwrap();
+    assert_ne!(
+        git_dir.stdout, common_dir.stdout,
+        "must be a linked worktree"
+    );
+
+    let reused = global_stele_command(&worktree, &user_config, &system_config)
+        .args(["run", "pwd"])
+        .env(stele::launch::STATE_HOME_ENV, &state_home)
+        .output()
+        .unwrap();
+    assert!(reused.status.success());
+    assert_eq!(
+        fs::canonicalize(String::from_utf8_lossy(&reused.stdout).trim()).unwrap(),
+        fs::canonicalize(&worktree).unwrap(),
+        "a linked checkout must not be nested in another worktree"
+    );
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        status.stdout.is_empty(),
+        "primary worktree must stay untouched"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn stele_run_cursor_hides_the_synthetic_stop_loop() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    sh(
+        &root,
+        "git init -q -b main && git config user.email t@t && git config user.name t",
+    );
+    fs::write(root.join("app.py"), "x = 1\n").unwrap();
+    fs::write(root.join("stele.toml"), RULES_TOML).unwrap();
+    sh(&root, "git add -A && git commit -qm init");
+
+    let user_config = tmp.path().join("config/stele/stele.toml");
+    let system_config = tmp.path().join("missing-system.toml");
+    let state_home = tmp.path().join("state");
+    let init = global_stele_command(&root, &user_config, &system_config)
+        .args(["init", "--global"])
+        .output()
+        .unwrap();
+    assert!(init.status.success());
+
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let cursor = bin.join("cursor-agent");
+    fs::write(
+        &cursor,
+        r###"#!/bin/sh
+case " $* " in
+  *" --resume "*)
+    printf '# Requirements\n\n## Functional\n\ndone\n\n## Risks\n\nnone\n' > requirements.md
+    ;;
+  *)
+    printf '\n# changed by fake cursor\n' >> app.py
+    ;;
+esac
+printf '{"session_id":"fake-session"}\n'
+"###,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&cursor).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&cursor, permissions).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = global_stele_command(&root, &user_config, &system_config)
+        .args([
+            "run",
+            "--name",
+            "cursor-dogfood",
+            "cursor",
+            "make the requested change",
+        ])
+        .env(stele::launch::STATE_HOME_ENV, &state_home)
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("synthetic block(s)"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let repo_state = fs::read_dir(state_home.join("worktrees"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let worktree = repo_state.join("cursor-dogfood");
+    assert!(worktree.join("requirements.md").is_file());
+    let git_dir = Command::new("git")
+        .args(["rev-parse", "--absolute-git-dir"])
+        .current_dir(&worktree)
+        .output()
+        .unwrap();
+    let git_dir = PathBuf::from(String::from_utf8_lossy(&git_dir.stdout).trim());
+    let events = fs::read_to_string(git_dir.join("stele/events.jsonl")).unwrap();
+    assert!(events.contains("synthetic-stop"), "{events}");
+    assert_eq!(fs::read_to_string(root.join("app.py")).unwrap(), "x = 1\n");
 }
 
 #[test]

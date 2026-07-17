@@ -52,17 +52,36 @@ Personal rules apply in every git repository without adding files to those
 repositories:
 
 ```console
-$ stele init --global       # ~/.config/stele/stele.toml
-$ stele install global      # Claude Code, Codex, Cursor IDE user hooks
-$ stele install hermes      # optional: Hermes' global hook
+$ stele install global      # create starter policy + wire every detected harness
+$ stele run codex           # launch in a managed linked worktree
+$ stele run cursor 'task'   # same, with Cursor's fallback loop selected for you
 ```
 
-The personal starter is immediately useful: it requires agent sessions to run
-inside a linked git worktree. `trigger = "always"` evaluates it even on a clean
-checkout; supported SessionStart channels explain the violation, and
-PreToolUse denies the first mutation while leaving read-only exploration
-available. Hook-less CLIs checked through `stele wrap` run the same preflight
-before the agent process starts.
+That single install command creates `~/.config/stele/stele.toml` when needed,
+merges Stele into Claude Code, Codex, and Cursor's user hooks, and wires Hermes
+when `~/.hermes/config.yaml` exists. Existing settings and third-party hooks
+are preserved. Rerunning it is a no-op; installing Hermes later only requires
+rerunning the same command.
+
+The personal starter requires agent sessions to run inside a linked git
+worktree. `stele run` creates a branch and worktree under
+`~/.local/state/stele/worktrees`, launches the requested agent there, and
+reuses the current checkout when it is already a linked worktree. It also
+selects Cursor headless's synthesized stop-loop automatically. The low-level
+`stele wrap` command remains available for custom resumable CLIs, but is not
+part of the normal workflow.
+
+To edit before enabling, `stele init --global` still writes only the personal
+config. To turn dogfooding off without touching repositories:
+
+```console
+$ stele uninstall global          # remove Stele-owned hooks; keep personal rules
+$ stele uninstall global --purge  # also remove the personal rule file
+```
+
+Uninstall removes only Stele-owned entries, including the Hermes shim, and
+preserves every unrelated user hook. Runtime caches and telemetry live under
+`.git/stele/`; they cannot be committed or pushed.
 
 Machine or organization policy can live at `/etc/stele/stele.toml` (Windows:
 `%PROGRAMDATA%\\stele\\stele.toml`). Provision that file together with managed
@@ -95,7 +114,7 @@ stele is that check, compiled to every delivery channel a harness offers:
 | native Stop hook | Claude Code, Codex, Devin CLI | `{"decision":"block"}` loops the agent until green |
 | stop follow-up | Cursor IDE | `{"followup_message"}` auto-submits the findings |
 | tool gatekeeper | Hermes | blocks tool calls while red; allows remediation |
-| synthesized stop-loop | any resumable CLI (`stele wrap`) | measure at exit, `--resume` with findings |
+| synthesized stop-loop | Cursor headless (`stele run cursor`) and custom resumable CLIs | measure at exit, `--resume` with findings |
 | git pre-push | everything that pushes | fast local wall |
 | CI (`stele check`) | everything | the unbypassable terminus |
 
@@ -132,10 +151,11 @@ so you can measure which layer catches what, per harness.
 
 ## Per-harness notes
 
-- **Hermes** hooks are global-only: run `stele install hermes` once per user;
-  the self-scoping shim no-ops outside git repositories with active rules.
-- **Cursor headless** (`cursor-agent -p`) executes no hooks at all — use
-  `stele wrap --prompt '<task>' -- cursor-agent -p --force`.
+- **Hermes** hooks are global-only. `stele install global` installs a
+  self-scoping shim that no-ops outside git repositories with active rules;
+  Hermes may request first-use consent for the new shell hook.
+- **Cursor headless** (`cursor-agent -p`) still emits no hook events in live
+  testing. `stele run cursor '<task>'` hides the external resume-loop adapter.
 - **Cloud Devin**: install the git hooks in the machine snapshot (fast
   channel); a watcher can inject findings via the send-message API, but must
   poll session state rather than fire-and-forget.

@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{compile, config};
+use crate::{compile, config, substrate};
 
 const TASK: &str =
     "Add a greet(name) function to app.py that returns f'Hello, {name}!'. Keep the change minimal.";
@@ -28,7 +28,7 @@ pub fn run(harnesses: &[String]) -> i32 {
         "claude-code",
         "codex",
         "codex-global",
-        "cursor-wrap",
+        "cursor-run",
         "hermes",
         "git-pre-push",
     ];
@@ -120,23 +120,34 @@ fn run_one(harness: &str) -> Result<Outcome, String> {
                 &[],
             )?;
         }
-        "cursor-wrap" => {
+        "cursor-run" => {
             require("cursor-agent")?;
+            let linked = dir.with_file_name(format!(
+                "{}-linked",
+                dir.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("stele-conformance-cursor")
+            ));
+            let _ = fs::remove_dir_all(&linked);
+            let status = Command::new("git")
+                .args(["worktree", "add", "--quiet", "-b", "cursor-run"])
+                .arg(&linked)
+                .arg("HEAD")
+                .current_dir(dir)
+                .status()
+                .map_err(|e| format!("git worktree add: {e}"))?;
+            if !status.success() {
+                return Err("git worktree add failed".into());
+            }
+            let _linked_guard = TempPath(linked.clone());
             let stele = std::env::current_exe().map_err(|e| e.to_string())?;
             agent(
-                dir,
+                &linked,
                 stele.to_str().unwrap_or("stele"),
-                &[
-                    "wrap",
-                    "--prompt",
-                    TASK,
-                    "--",
-                    "cursor-agent",
-                    "-p",
-                    "--force",
-                ],
+                &["run", "cursor", TASK],
                 &[],
             )?;
+            return assess(harness, &linked);
         }
         "hermes" => {
             require("hermes")?;
@@ -364,7 +375,10 @@ fn assess(harness: &str, dir: &Path) -> Result<Outcome, String> {
         .map_err(|e| e.to_string())?;
     let green = check.status.success();
     let artifact = dir.join("requirements.md").is_file();
-    let events = fs::read_to_string(dir.join(".git/stele/events.jsonl")).unwrap_or_default();
+    let events = substrate::find_git_dir(dir)
+        .ok()
+        .and_then(|git_dir| fs::read_to_string(git_dir.join("stele/events.jsonl")).ok())
+        .unwrap_or_default();
     let gate_fired = events.contains("\"blocked\"")
         || events.contains("tool-blocked")
         || events.contains("synthetic-stop");
@@ -373,6 +387,14 @@ fn assess(harness: &str, dir: &Path) -> Result<Outcome, String> {
         passed: green && artifact && gate_fired,
         detail: format!("green={green} artifact={artifact} gate-fired={gate_fired}"),
     })
+}
+
+struct TempPath(PathBuf);
+
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 fn agent(dir: &Path, bin: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<(), String> {

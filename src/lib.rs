@@ -18,6 +18,7 @@ pub mod doctor;
 pub mod emit;
 pub mod engine;
 pub mod hook;
+pub mod launch;
 pub mod rules;
 pub mod substrate;
 pub mod wrap;
