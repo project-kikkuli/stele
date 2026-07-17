@@ -17,8 +17,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   WSL/Git Bash rather than implying native `cmd`/PowerShell.
 
 ### Packaging
-- Added `keywords`, `categories`, `readme`, and `documentation` to `Cargo.toml`
-  ahead of the first crates.io release.
+- Added `keywords`, `categories`, `readme`, and `documentation` to `Cargo.toml`.
+  The `stele` name on crates.io belongs to an unrelated crate, so `cargo install
+  --git` stays the canonical install path.
 - Added `CHANGELOG.md` and Dependabot for Cargo and GitHub Actions.
 
 ## [0.1.0]

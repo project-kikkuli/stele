@@ -9,7 +9,8 @@ and CI.
 
 ## Install and try it
 
-Until the first crates.io release, install from the repository:
+Install from the repository (the crates.io name is taken by an unrelated crate,
+so the git install is the canonical path):
 
 ```console
 $ cargo install --git https://github.com/project-kikkuli/stele.git --locked
