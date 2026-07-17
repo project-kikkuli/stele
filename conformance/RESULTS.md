@@ -1,4 +1,34 @@
-# Conformance validation results — 2026-07-16
+# Conformance validation results
+
+## 2026-07-17 — `stele conformance` (the built binary, all channels)
+
+All five channels PASS end-to-end through the shipped `stele` binary
+(`stele compile`-generated wiring, real agents, telemetry-verified gates):
+
+| harness | result | detail |
+|---|---|---|
+| claude-code | PASS | green ✓ artifact ✓ gate fired ✓ |
+| codex | PASS | green ✓ artifact ✓ gate fired ✓ |
+| cursor-wrap | PASS | green ✓ artifact ✓ synthetic stop fired ✓ |
+| hermes | PASS | green ✓ artifact ✓ gatekeeper fired ✓ |
+| git-pre-push | PASS | red exit 1, green exit 0 |
+
+Three real bugs the sweep itself caught (each now fixed + unit-tested):
+
+1. **Env leak**: hooks honored `CLAUDE_PROJECT_DIR` for every harness, so
+   codex/hermes hooks running nested inside a Claude session measured the
+   WRONG repo. Now claude-code-only.
+2. **Exhortation contaminated the experiment**: agents (codex, cursor) read
+   the fixture's generated AGENTS.md and complied proactively, leaving the
+   gate untested. Conformance fixtures now strip AGENTS.md to isolate the
+   enforcement channel. (Silver lining: the prose layer demonstrably works.)
+3. **The gatekeeper one-step-behind hole**: scope-triggered rules don't fire
+   on a clean tree, so the FIRST mutating tool call — the one that creates
+   the red — passed the hermes gate, and a one-write task escaped entirely.
+   Gatekeeper now checks artifact rules unconditionally and gates only
+   mutating tools (read-only sessions never harassed).
+
+## 2026-07-16 — original bash-rig validation
 
 Rule under test: `requirements.md` must exist at repo root with `# Requirements`,
 `## Functional`, `## Risks`. Task given to each agent never mentions the file.

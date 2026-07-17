@@ -109,12 +109,13 @@ fn run_one(harness: &str) -> Result<Outcome, String> {
             // Environment tier: no agent needed. Red worktree must make the
             // stele-owned pre-push hook exit nonzero; green must pass it.
             let hook = dir.join(".git/hooks/pre-push");
+            // Dirty the tree first — a clean fixture is green by definition.
+            fs::write(dir.join("app.py"), "def add(a, b):\n    return a + b\n\n\ndef greet(name):\n    return f'Hello, {name}!'\n")
+                .map_err(|e| e.to_string())?;
             let red = Command::new(&hook)
                 .current_dir(dir)
                 .output()
                 .map_err(|e| format!("pre-push: {e}"))?;
-            fs::write(dir.join("app.py"), "def add(a, b):\n    return a + b\n\n\ndef greet(name):\n    return f'Hello, {name}!'\n")
-                .map_err(|e| e.to_string())?;
             fs::write(
                 dir.join("requirements.md"),
                 "# Requirements\n\n## Functional\n\ngreet added\n\n## Risks\n\nnone\n",
@@ -192,6 +193,11 @@ sections = ["# Requirements", "## Functional", "## Risks"]
             String::from_utf8_lossy(&out.stderr)
         ));
     }
+    // Isolate the enforcement channel under test: the generated AGENTS.md is
+    // the exhortation layer, and agents that read it comply proactively —
+    // which would leave the gate untested (observed live: codex and cursor
+    // created the artifact from AGENTS.md alone).
+    let _ = fs::remove_file(dir.join("AGENTS.md"));
     sh(&dir, "git add -A && git commit -qm 'fixture: initial state'")?;
     Ok(Fixture(dir))
 }

@@ -129,6 +129,17 @@ fn check_command(rule: &Rule, substrate: &Substrate) -> RuleResult {
     }
 }
 
+/// Artifact findings regardless of scope triggering — for gatekeeper channels
+/// (hermes pre_tool_call), which must gate the call that would CREATE the red:
+/// scope-triggered evaluation is one step behind there, because the change-set
+/// is still empty when the first mutating call is decided.
+pub fn artifact_findings_unconditional(rule: &Rule, substrate: &Substrate) -> Vec<String> {
+    if rule.artifact.is_none() {
+        return vec![];
+    }
+    check_artifact(rule, substrate)
+}
+
 pub fn evaluate(rule: &Rule, substrate: &Substrate) -> RuleResult {
     if !in_scope(rule, substrate) {
         return RuleResult {

@@ -386,10 +386,14 @@ fn hook_hermes_gatekeeper_allows_remediation_blocks_the_rest() {
     fs::write(root.join("app.py"), "v2\n").unwrap();
     let base = format!(r#""cwd": "{}""#, root.display());
 
-    let blocked = format!(r#"{{{base}, "tool_name": "read_file", "tool_input": {{"path": "app.py"}}}}"#);
+    // Mutating tools are gated while red; read-only tools always pass.
+    let blocked = format!(r#"{{{base}, "tool_name": "terminal", "tool_input": {{"command": "touch app.py"}}}}"#);
     let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &blocked);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["action"], "block");
+    let readonly = format!(r#"{{{base}, "tool_name": "read_file", "tool_input": {{"path": "app.py"}}}}"#);
+    let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &readonly);
+    assert_eq!(out.trim(), "{}");
 
     let remediation = format!(
         r#"{{{base}, "tool_name": "write_file", "tool_input": {{"path": "requirements.md"}}}}"#
@@ -671,4 +675,38 @@ fn compile_wires_pre_tool_use_guard() {
     stele::compile::run(&root, &rules).unwrap();
     let body = fs::read_to_string(root.join(".claude/settings.json")).unwrap();
     assert!(body.contains("stele hook claude-code pre-tool-use"), "{body}");
+}
+
+#[test]
+fn hermes_gatekeeper_blocks_the_call_that_would_create_the_red() {
+    // CLEAN fixture: change-set empty, scoped evaluation wouldn't trigger —
+    // but the gate must stop the first mutating call anyway (the one-step-
+    // behind hole found by `stele conformance`).
+    let (_tmp, root) = fixture();
+    let base = format!(r#""cwd": "{}""#, root.display());
+
+    // Mutating tool on a clean tree: blocked.
+    let write = format!(r#"{{{base}, "tool_name": "write_file", "tool_input": {{"path": "app.py"}}}}"#);
+    let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &write);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["action"], "block", "first mutating call must be gated: {out}");
+
+    // Read-only tool: always allowed.
+    let read = format!(r#"{{{base}, "tool_name": "read_file", "tool_input": {{"path": "app.py"}}}}"#);
+    let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &read);
+    assert_eq!(out.trim(), "{}", "read-only tools pass: {out}");
+
+    // Remediation: allowed.
+    let fix = format!(r#"{{{base}, "tool_name": "write_file", "tool_input": {{"path": "requirements.md"}}}}"#);
+    let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &fix);
+    assert_eq!(out.trim(), "{}", "artifact write passes: {out}");
+
+    // Artifact satisfied: everything allowed again.
+    fs::write(
+        root.join("requirements.md"),
+        "# Requirements\n## Functional\nx\n## Risks\ny\n",
+    )
+    .unwrap();
+    let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &write);
+    assert_eq!(out.trim(), "{}", "green tree passes: {out}");
 }

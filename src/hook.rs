@@ -27,7 +27,7 @@ fn run_inner(harness_name: &str, event: &str) -> Result<i32, String> {
     let mut payload_text = String::new();
     let _ = std::io::stdin().read_to_string(&mut payload_text);
     let payload: Value = serde_json::from_str(&payload_text).unwrap_or(Value::Null);
-    let root = resolve_root(&payload);
+    let root = resolve_root(harness, &payload);
 
     // Loop guards, per harness (empirical: claude/codex/devin send
     // stop_hook_active on the retry; cursor sends loop_count). Logged so
@@ -71,7 +71,7 @@ fn run_inner(harness_name: &str, event: &str) -> Result<i32, String> {
             handle_prompt(harness, event, &state, &sub.signature, &verdict)
         }
         "pre-tool-use" | "pre_tool_call" => {
-            handle_toolgate(harness, event, &state, &verdict, &payload_text, &payload)
+            handle_toolgate(harness, event, &state, &sub, &verdict, &payload_text, &payload)
         }
         _ => Ok(0),
     }
@@ -81,10 +81,15 @@ fn event_is_stop(event: &str) -> bool {
     matches!(event, "stop" | "Stop" | "session-end" | "SessionEnd")
 }
 
-fn resolve_root(payload: &Value) -> PathBuf {
-    if let Ok(dir) = std::env::var("CLAUDE_PROJECT_DIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
+fn resolve_root(harness: Harness, payload: &Value) -> PathBuf {
+    // CLAUDE_PROJECT_DIR is authoritative only for Claude Code's own hooks.
+    // Other harnesses may run nested inside a Claude session and inherit the
+    // var pointing at the WRONG repo (found live by `stele conformance`).
+    if harness == Harness::ClaudeCode {
+        if let Ok(dir) = std::env::var("CLAUDE_PROJECT_DIR") {
+            if !dir.is_empty() {
+                return PathBuf::from(dir);
+            }
         }
     }
     if let Some(cwd) = payload["cwd"].as_str() {
@@ -172,26 +177,26 @@ fn handle_prompt(
 }
 
 /// Tool gate. Two duties:
-/// - hermes: the only enforcement channel — block tools while red, allow
-///   remediation (calls touching a required artifact).
+/// - hermes: the only enforcement channel — block mutating tools while the
+///   required artifacts are red, allow remediation (calls touching a required
+///   artifact) and all read-only tools.
 /// - claude/codex/devin: protect the git layer — deny `--no-verify` while
 ///   blocking rules are red, so an agent can't skip the pre-push wall.
 fn handle_toolgate(
     harness: Harness,
     event: &str,
     state: &State,
+    sub: &crate::substrate::Substrate,
     verdict: &engine::Verdict,
     payload_text: &str,
     payload: &Value,
 ) -> Result<i32, String> {
-    let blocking = verdict.blocking();
-
     if harness != Harness::Hermes {
         // --no-verify guard: only while red; when green the flag is harmless.
         let command = payload["tool_input"]["command"].as_str().unwrap_or("");
         let dodging = command.contains("--no-verify")
             && (command.contains("git commit") || command.contains("git push"));
-        if dodging && !blocking.is_empty() {
+        if dodging && !verdict.blocking().is_empty() {
             state.log_event(harness.name(), event, "no-verify-denied", command);
             println!(
                 "{}",
@@ -206,19 +211,39 @@ fn handle_toolgate(
 
     // Hermes gatekeeper. Only artifact rules engage: a command rule gives no
     // safe remediation-allowance heuristic and would deadlock the agent.
-    let artifact_reds: Vec<_> = blocking
-        .iter()
-        .filter(|r| r.rule.artifact.is_some())
-        .collect();
-    if artifact_reds.is_empty() {
+    //
+    // Two deliberate asymmetries vs. stop-time gating (both found live):
+    // - Artifact rules are checked UNCONDITIONALLY, not scope-triggered: the
+    //   gate must stop the call that would CREATE the red, when the
+    //   change-set is still empty and scoped rules haven't triggered yet.
+    // - Only MUTATING tools are gated, so read-only sessions in a stele repo
+    //   are never harassed.
+    let tool_name = payload["tool_name"].as_str().unwrap_or("");
+    if !is_mutating_tool(tool_name) {
         if let Some(allow) = emit::tool_allow(harness) {
             println!("{allow}");
         }
         return Ok(0);
     }
-    let remediation = artifact_reds.iter().any(|r| {
-        r.rule
-            .artifact
+    let red_artifacts: Vec<&crate::config::Rule> = verdict
+        .results
+        .iter()
+        .map(|r| &r.rule)
+        .filter(|rule| {
+            rule.severity == crate::config::Severity::Block
+                && rule.artifact.is_some()
+                && !verdict.acked.contains(&rule.id)
+                && !crate::rules::artifact_findings_unconditional(rule, sub).is_empty()
+        })
+        .collect();
+    if red_artifacts.is_empty() {
+        if let Some(allow) = emit::tool_allow(harness) {
+            println!("{allow}");
+        }
+        return Ok(0);
+    }
+    let remediation = red_artifacts.iter().any(|rule| {
+        rule.artifact
             .as_ref()
             .is_some_and(|a| payload_text.contains(a.path.as_str()))
     });
@@ -230,6 +255,23 @@ fn handle_toolgate(
         return Ok(0);
     }
     state.log_event(harness.name(), event, "tool-blocked", "");
-    println!("{}", emit::tool_block(harness, &engine::render_reason(verdict)));
+    let reason = format!(
+        "stele gatekeeper: required artifacts are missing or malformed.\n{}\nCreate them first (they are the only writes allowed right now), then retry this tool call.",
+        red_artifacts
+            .iter()
+            .flat_map(|rule| crate::rules::artifact_findings_unconditional(rule, sub))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    println!("{}", emit::tool_block(harness, &reason));
     Ok(0)
+}
+
+/// Heuristic set of tool names that change files or run commands. Read-only
+/// tools pass the gatekeeper unconditionally.
+fn is_mutating_tool(tool_name: &str) -> bool {
+    let t = tool_name.to_ascii_lowercase();
+    ["write", "patch", "edit", "terminal", "shell", "bash", "create", "delete", "move", "exec"]
+        .iter()
+        .any(|kw| t.contains(kw))
 }
