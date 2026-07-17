@@ -7,6 +7,27 @@ Declare a repository rule **once**; get it enforced across **every** AI coding
 agent harness — Claude Code, Codex CLI, Cursor, Devin, Hermes — plus git hooks
 and CI.
 
+## Install and try it
+
+Until the first crates.io release, install from the repository:
+
+```console
+$ cargo install --git https://github.com/project-kikkuli/stele.git --locked
+```
+
+For a repository-owned policy:
+
+```console
+$ cd your-project
+$ stele init
+$ $EDITOR stele.toml
+$ stele compile
+$ stele doctor
+```
+
+Commit `stele.toml` and the generated agent/CI files. From then on the same
+rule is checked in agent lifecycle hooks, pre-push, and CI.
+
 ```toml
 # stele.toml
 [[rule]]
@@ -24,6 +45,40 @@ $ stele init      # write a starter stele.toml
 $ stele compile   # fan it out to every channel
 $ stele check     # measure the current change-set (0 green · 1 red · 3 unmeasurable)
 ```
+
+## Personal and system rules
+
+Personal rules apply in every git repository without adding files to those
+repositories:
+
+```console
+$ stele init --global       # ~/.config/stele/stele.toml
+$ stele install global      # Claude Code, Codex, Cursor IDE user hooks
+$ stele install hermes      # optional: Hermes' global hook
+```
+
+The personal starter is immediately useful: it requires agent sessions to run
+inside a linked git worktree. `trigger = "always"` evaluates it even on a clean
+checkout; supported SessionStart channels explain the violation, and
+PreToolUse denies the first mutation while leaving read-only exploration
+available. Hook-less CLIs checked through `stele wrap` run the same preflight
+before the agent process starts.
+
+Machine or organization policy can live at `/etc/stele/stele.toml` (Windows:
+`%PROGRAMDATA%\\stele\\stele.toml`). Provision that file together with managed
+agent hooks and on CI runners. `STELE_USER_CONFIG` and `STELE_SYSTEM_CONFIG`
+override both paths; `XDG_CONFIG_HOME` is honored for the personal config.
+
+Rules accumulate in this order:
+
+1. system
+2. personal/user
+3. repository
+
+IDs must be unique across active layers. Global hooks evaluate only system and
+personal rules; generated repository hooks evaluate only repository rules, so
+installing both does not duplicate findings. Personal rules are never copied
+into a repository's `AGENTS.md` or generated CI workflow.
 
 ## Why
 
@@ -62,7 +117,9 @@ Two kinds:
   change-set) and must be a pure function of them.
 
 `scope` globs (with `!` excludes) gate when a rule triggers; `severity =
-"nudge"` speaks once but never blocks.
+"nudge"` speaks once but never blocks. `trigger = "always"` defines a session
+precondition that also runs on clean trees. `acknowledge = false` makes an
+invariant ineligible for `stele ack`.
 
 ## Noise economics
 
@@ -76,7 +133,7 @@ so you can measure which layer catches what, per harness.
 ## Per-harness notes
 
 - **Hermes** hooks are global-only: run `stele install hermes` once per user;
-  the repo carries a self-scoping shim that no-ops outside stele repos.
+  the self-scoping shim no-ops outside git repositories with active rules.
 - **Cursor headless** (`cursor-agent -p`) executes no hooks at all — use
   `stele wrap --prompt '<task>' -- cursor-agent -p --force`.
 - **Cloud Devin**: install the git hooks in the machine snapshot (fast

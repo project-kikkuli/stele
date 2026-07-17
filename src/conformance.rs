@@ -12,6 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::{compile, config};
+
 const TASK: &str =
     "Add a greet(name) function to app.py that returns f'Hello, {name}!'. Keep the change minimal.";
 
@@ -25,6 +27,7 @@ pub fn run(harnesses: &[String]) -> i32 {
     let all = [
         "claude-code",
         "codex",
+        "codex-global",
         "cursor-wrap",
         "hermes",
         "git-pre-push",
@@ -81,6 +84,9 @@ pub fn run(harnesses: &[String]) -> i32 {
 }
 
 fn run_one(harness: &str) -> Result<Outcome, String> {
+    if harness == "codex-global" {
+        return run_codex_global();
+    }
     let fixture = provision(harness)?;
     let dir = fixture.path();
 
@@ -151,6 +157,7 @@ fn run_one(harness: &str) -> Result<Outcome, String> {
                 .map_err(|e| e.to_string())?;
             let red = Command::new(&hook)
                 .current_dir(dir)
+                .env(config::DISABLE_GLOBAL_ENV, "1")
                 .output()
                 .map_err(|e| format!("pre-push: {e}"))?;
             fs::write(
@@ -160,6 +167,7 @@ fn run_one(harness: &str) -> Result<Outcome, String> {
             .map_err(|e| e.to_string())?;
             let green = Command::new(&hook)
                 .current_dir(dir)
+                .env(config::DISABLE_GLOBAL_ENV, "1")
                 .output()
                 .map_err(|e| format!("pre-push: {e}"))?;
             let passed = !red.status.success() && green.status.success();
@@ -177,6 +185,105 @@ fn run_one(harness: &str) -> Result<Outcome, String> {
     }
 
     assess(harness, dir)
+}
+
+/// Live proof for the personal-policy wow path: Codex starts in a clean repo
+/// with no repository `stele.toml`; a user-level `trigger = "always"` rule and
+/// user hook must surface before the agent can edit the primary checkout.
+fn run_codex_global() -> Result<Outcome, String> {
+    require("codex")?;
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "stele-conformance-codex-global-{}",
+        std::process::id()
+    )));
+    let base = fixture.path();
+    let _ = fs::remove_dir_all(base);
+    fs::create_dir_all(base).map_err(|e| e.to_string())?;
+    let dir = base.join("repo");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    sh(
+        &dir,
+        "git init -qb main && git config user.email t@t && git config user.name stele",
+    )?;
+    const ORIGINAL: &str = "def add(a, b):\n    return a + b\n";
+    fs::write(dir.join("app.py"), ORIGINAL).map_err(|e| e.to_string())?;
+    sh(
+        &dir,
+        "git add -A && git commit -qm 'fixture: initial state'",
+    )?;
+
+    let user_config = base.join("personal/stele.toml");
+    fs::create_dir_all(user_config.parent().unwrap_or(base)).map_err(|e| e.to_string())?;
+    fs::write(
+        &user_config,
+        r###"[[rule]]
+id = "personal-worktree-only"
+description = "agents always work in linked git worktrees"
+trigger = "always"
+acknowledge = false
+message = "Relaunch from a linked worktree."
+check = '''
+git_dir=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) || exit 1
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 1
+[ "$git_dir" != "$common_dir" ] || {
+  echo '✗ agent session is running in the primary checkout, not a linked worktree'
+  exit 1
+}
+'''
+"###,
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Isolate Codex's user config while reusing the caller's authentication.
+    let fake_home = base.join("home");
+    let codex_home = fake_home.join(".codex");
+    fs::create_dir_all(&codex_home).map_err(|e| e.to_string())?;
+    let real_codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
+        .ok_or("no CODEX_HOME or HOME for Codex authentication")?;
+    let auth = real_codex_home.join("auth.json");
+    if !auth.is_file() {
+        return Err(format!("{} missing; cannot run live Codex", auth.display()));
+    }
+    fs::copy(&auth, codex_home.join("auth.json")).map_err(|e| e.to_string())?;
+    compile::install_global_at(&fake_home)?;
+
+    let codex_home = codex_home.to_string_lossy().into_owned();
+    let user_config = user_config.to_string_lossy().into_owned();
+    let system_config = base
+        .join("missing-system.toml")
+        .to_string_lossy()
+        .into_owned();
+    agent(
+        &dir,
+        "codex",
+        &[
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-bypass-hook-trust",
+            TASK,
+        ],
+        &[
+            ("CODEX_HOME", &codex_home),
+            (config::USER_CONFIG_ENV, &user_config),
+            (config::SYSTEM_CONFIG_ENV, &system_config),
+            (config::DISABLE_GLOBAL_ENV, "0"),
+        ],
+    )?;
+
+    let unchanged = fs::read_to_string(dir.join("app.py")).unwrap_or_default() == ORIGINAL;
+    let events = fs::read_to_string(dir.join(".git/stele/events.jsonl")).unwrap_or_default();
+    let context_fired = events.contains("context-injected");
+    let gate_fired = events.contains("preflight-blocked");
+    let policy_fired = context_fired || gate_fired;
+    Ok(Outcome {
+        harness: "codex-global".into(),
+        passed: unchanged && policy_fired,
+        detail: format!(
+            "primary-untouched={unchanged} session-context={context_fired} pretool-gate={gate_fired}"
+        ),
+    })
 }
 
 /// Fresh fixture: git repo + app.py + stele.toml (red rule: touching *.py
@@ -226,6 +333,7 @@ sections = ["# Requirements", "## Functional", "## Risks"]
     let out = Command::new(&stele)
         .arg("compile")
         .current_dir(&dir)
+        .env(config::DISABLE_GLOBAL_ENV, "1")
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -251,6 +359,7 @@ fn assess(harness: &str, dir: &Path) -> Result<Outcome, String> {
     let check = Command::new(&stele)
         .arg("check")
         .current_dir(dir)
+        .env(config::DISABLE_GLOBAL_ENV, "1")
         .output()
         .map_err(|e| e.to_string())?;
     let green = check.status.success();
@@ -268,16 +377,22 @@ fn assess(harness: &str, dir: &Path) -> Result<Outcome, String> {
 
 fn agent(dir: &Path, bin: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<(), String> {
     let mut cmd = Command::new(bin);
-    cmd.args(args).current_dir(dir);
+    cmd.args(args)
+        .current_dir(dir)
+        .env(config::DISABLE_GLOBAL_ENV, "1");
     for (k, v) in envs {
         cmd.env(k, v);
     }
     let out = cmd.output().map_err(|e| format!("{bin}: {e}"))?;
     if !out.status.success() {
         eprintln!(
-            "   ({bin} exited {:?}: {})",
+            "   ({bin} exited {:?}: stderr={} stdout={})",
             out.status.code(),
             String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or(""),
+            String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .last()
                 .unwrap_or("")

@@ -4,7 +4,7 @@
 //! executes no hooks; hermes ignores duplicate YAML keys; codex needs hook
 //! trust). doctor makes "is the gate actually armed?" a one-command question.
 
-use crate::config;
+use crate::config::{self, LayerKind, LoadScope};
 use crate::substrate;
 use std::path::Path;
 use std::process::Command;
@@ -42,42 +42,93 @@ pub fn run() -> i32 {
         r.bad("not inside a git repository");
         return finish(r);
     };
-    match config::load(&root) {
-        Ok(rules) => r.ok(&format!("stele.toml with {} rule(s)", rules.len())),
+    let rules = match config::load(&root) {
+        Ok(rules) => {
+            r.ok(&format!("{} active rule(s)", rules.len()));
+            rules
+        }
         Err(e) => {
-            r.bad(&format!("stele.toml: {e}"));
+            r.bad(&format!("rules: {e}"));
             return finish(r);
+        }
+    };
+    let layers = match config::layers(&root, LoadScope::All) {
+        Ok(layers) => layers,
+        Err(e) => {
+            r.bad(&format!("layers: {e}"));
+            return finish(r);
+        }
+    };
+    for layer in &layers {
+        r.ok(&format!(
+            "{} config: {} ({} rule(s))",
+            layer.kind.name(),
+            layer.path.display(),
+            layer.rules.len()
+        ));
+    }
+    let has_repo = layers
+        .iter()
+        .any(|layer| layer.kind == LayerKind::Repository);
+    let has_user = layers.iter().any(|layer| layer.kind == LayerKind::User);
+    let has_system = layers.iter().any(|layer| layer.kind == LayerKind::System);
+    let _ = rules;
+
+    if has_repo {
+        // Per-repository channel wiring.
+        check_json_wiring(&mut r, &root, ".claude/settings.json", "claude-code");
+        check_json_wiring(&mut r, &root, ".codex/hooks.json", "codex");
+        check_json_wiring(&mut r, &root, ".devin/hooks.v1.json", "devin-cli");
+        check_json_wiring(&mut r, &root, ".cursor/hooks.json", "cursor");
+
+        let pre_push = root.join(".git/hooks/pre-push");
+        match std::fs::read_to_string(&pre_push) {
+            Ok(body) if body.contains("stele") => r.ok("git pre-push hook (stele-owned)"),
+            Ok(_) => r.warn("git pre-push exists but is not stele's (CI still enforces)"),
+            Err(_) => r.bad("git pre-push hook missing — run `stele compile`"),
+        }
+        if root.join(".github/workflows/stele.yml").is_file() {
+            r.ok("CI workflow present");
+        } else {
+            r.bad("CI workflow missing — the unbypassable floor isn't installed");
         }
     }
 
-    // Per-channel wiring.
-    check_json_wiring(&mut r, &root, ".claude/settings.json", "claude-code");
-    check_json_wiring(&mut r, &root, ".codex/hooks.json", "codex");
-    check_json_wiring(&mut r, &root, ".devin/hooks.v1.json", "devin-cli");
-    check_json_wiring(&mut r, &root, ".cursor/hooks.json", "cursor");
-
-    let pre_push = root.join(".git/hooks/pre-push");
-    match std::fs::read_to_string(&pre_push) {
-        Ok(body) if body.contains("stele") => r.ok("git pre-push hook (stele-owned)"),
-        Ok(_) => r.warn("git pre-push exists but is not stele's (CI still enforces)"),
-        Err(_) => r.bad("git pre-push hook missing — run `stele compile`"),
+    if has_user {
+        if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+            check_json_path(
+                &mut r,
+                &home.join(".claude/settings.json"),
+                "~/.claude/settings.json",
+                "claude-code",
+            );
+            check_json_path(
+                &mut r,
+                &home.join(".codex/hooks.json"),
+                "~/.codex/hooks.json",
+                "codex",
+            );
+            check_json_path(
+                &mut r,
+                &home.join(".cursor/hooks.json"),
+                "~/.cursor/hooks.json",
+                "cursor",
+            );
+        } else {
+            r.bad("no $HOME; cannot inspect personal hook wiring");
+        }
     }
-    if root.join(".github/workflows/stele.yml").is_file() {
-        r.ok("CI workflow present");
-    } else {
-        r.bad("CI workflow missing — the unbypassable floor isn't installed");
+    if has_system {
+        r.warn("system rules require managed hooks on each developer machine and CI runner");
     }
 
     // Hermes: global config, so check the user's config for our shim.
-    let shim = root.join(".stele/hermes-shim.sh");
-    if shim.is_file() {
+    if has_repo || has_user || has_system {
         let hermes_cfg = std::env::var("HOME")
             .map(|h| Path::new(&h).join(".hermes/config.yaml"))
             .ok();
         match hermes_cfg.and_then(|p| std::fs::read_to_string(p).ok()) {
-            Some(cfg) if cfg.contains(&shim.display().to_string()) => {
-                r.ok("hermes global config wired to this repo's shim")
-            }
+            Some(cfg) if cfg.contains("stele") => r.ok("hermes global config wired"),
             Some(_) => r.warn("hermes installed but not wired — run `stele install hermes`"),
             None => r.warn("hermes config not found (skip if you don't use hermes)"),
         }
@@ -112,17 +163,23 @@ fn finish(r: Report) -> i32 {
 
 fn check_json_wiring(r: &mut Report, root: &Path, rel: &str, harness: &str) {
     let path = root.join(rel);
-    match std::fs::read_to_string(&path) {
+    check_json_path(r, &path, rel, harness);
+}
+
+fn check_json_path(r: &mut Report, path: &Path, label: &str, harness: &str) {
+    match std::fs::read_to_string(path) {
         Ok(body) if body.contains(&format!("stele hook {harness}")) => {
-            r.ok(&format!("{rel} wired"));
+            r.ok(&format!("{label} wired"));
             if harness == "cursor" {
                 r.warn("cursor: hooks fire in the IDE only — headless runs need `stele wrap`");
             }
         }
         Ok(_) => r.bad(&format!(
-            "{rel} exists but has no stele hook — run `stele compile`"
+            "{label} exists but has no stele hook — run the relevant Stele installer"
         )),
-        Err(_) => r.bad(&format!("{rel} missing — run `stele compile`")),
+        Err(_) => r.bad(&format!(
+            "{label} missing — run the relevant Stele installer"
+        )),
     }
 }
 

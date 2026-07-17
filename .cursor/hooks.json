@@ -1,8 +1,20 @@
 {
   "hooks": {
+    "preToolUse": [
+      {
+        "command": "stele hook cursor pre-tool-use --scope repo",
+        "timeout": 30
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "stele hook cursor session-start --scope repo",
+        "timeout": 30
+      }
+    ],
     "stop": [
       {
-        "command": "stele hook cursor stop",
+        "command": "stele hook cursor stop --scope repo",
         "timeout": 30
       }
     ]

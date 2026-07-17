@@ -14,12 +14,12 @@ use serde_json::Value;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub fn run(harness_name: &str, event: &str) -> i32 {
+pub fn run(harness_name: &str, event: &str, scope: config::LoadScope) -> i32 {
     // Everything inside is fail-open; the wrapper only translates errors.
-    run_inner(harness_name, event).unwrap_or_default()
+    run_inner(harness_name, event, scope).unwrap_or_default()
 }
 
-fn run_inner(harness_name: &str, event: &str) -> Result<i32, String> {
+fn run_inner(harness_name: &str, event: &str, scope: config::LoadScope) -> Result<i32, String> {
     let Some(harness) = Harness::parse(harness_name) else {
         return Ok(0);
     };
@@ -44,13 +44,14 @@ fn run_inner(harness_name: &str, event: &str) -> Result<i32, String> {
     let Ok(sub) = substrate::compute(&root) else {
         return Ok(0);
     };
-    let Ok(rule_set) = config::load(&sub.root) else {
-        return Ok(0); // no stele.toml here: not a stele repo, stay silent
+    let Ok(rule_set) = config::load_scope(&sub.root, scope) else {
+        return Ok(0); // no rules in this hook's layer: stay silent
     };
-    let state = State::new(&sub);
+    let state = State::scoped(&sub, scope.name());
+    let policy_signature = engine::policy_signature(&rule_set, &sub.signature);
 
     // Green verdict cache: a measured-green change-set stays silent for free.
-    if event_is_stop(event) && state.is_green_cached(&sub.signature) {
+    if event_is_stop(event) && state.is_green_cached(&policy_signature) {
         state.log_event(harness.name(), event, "green-cached", "");
         return Ok(0);
     }
@@ -66,9 +67,12 @@ fn run_inner(harness_name: &str, event: &str) -> Result<i32, String> {
     }
 
     match event {
-        e if event_is_stop(e) => handle_stop(harness, event, &state, &sub.signature, &verdict),
+        e if event_is_stop(e) => handle_stop(harness, event, &state, &policy_signature, &verdict),
         "prompt" | "user-prompt-submit" => {
-            handle_prompt(harness, event, &state, &sub.signature, &verdict)
+            handle_prompt(harness, event, &state, &policy_signature, &verdict)
+        }
+        "session-start" | "SessionStart" => {
+            handle_prompt(harness, event, &state, &policy_signature, &verdict)
         }
         "pre-tool-use" | "pre_tool_call" => handle_toolgate(
             harness,
@@ -176,7 +180,7 @@ fn handle_prompt(
     } else {
         engine::render_reason(verdict)
     };
-    println!("{}", emit::prompt_context(&text));
+    println!("{}", emit::lifecycle_context(harness, event, &text));
     Ok(0)
 }
 
@@ -195,6 +199,35 @@ fn handle_toolgate(
     payload_text: &str,
     payload: &Value,
 ) -> Result<i32, String> {
+    let tool_name = payload["tool_name"].as_str().unwrap_or("");
+
+    // `trigger = "always"` is a preflight invariant. Gate the first mutation
+    // instead of waiting until stop-time; command rules such as "must be in a
+    // linked worktree" cannot be remediated safely inside the current session.
+    let preflight = verdict.preflight();
+    if !preflight.is_empty() && is_mutating_tool(tool_name) {
+        let remediation = preflight.iter().any(|result| {
+            result
+                .rule
+                .artifact
+                .as_ref()
+                .is_some_and(|artifact| payload_text.contains(&artifact.path))
+        });
+        if remediation {
+            state.log_event(harness.name(), event, "allowed-preflight-remediation", "");
+            if let Some(allow) = emit::tool_allow(harness) {
+                println!("{allow}");
+            }
+            return Ok(0);
+        }
+        state.log_event(harness.name(), event, "preflight-blocked", tool_name);
+        println!(
+            "{}",
+            emit::tool_block(harness, &engine::render_preflight(verdict))
+        );
+        return Ok(0);
+    }
+
     if harness != Harness::Hermes {
         // --no-verify guard: only while red; when green the flag is harmless.
         let command = payload["tool_input"]["command"].as_str().unwrap_or("");
@@ -222,7 +255,6 @@ fn handle_toolgate(
     //   change-set is still empty and scoped rules haven't triggered yet.
     // - Only MUTATING tools are gated, so read-only sessions in a stele repo
     //   are never harassed.
-    let tool_name = payload["tool_name"].as_str().unwrap_or("");
     if !is_mutating_tool(tool_name) {
         if let Some(allow) = emit::tool_allow(harness) {
             println!("{allow}");
@@ -236,7 +268,7 @@ fn handle_toolgate(
         .filter(|rule| {
             rule.severity == crate::config::Severity::Block
                 && rule.artifact.is_some()
-                && !verdict.acked.contains(&rule.id)
+                && (!rule.acknowledge || !verdict.acked.contains(&rule.id))
                 && !crate::rules::artifact_findings_unconditional(rule, sub).is_empty()
         })
         .collect();

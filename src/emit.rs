@@ -82,3 +82,14 @@ pub fn tool_allow(harness: Harness) -> Option<String> {
 pub fn prompt_context(reason: &str) -> String {
     reason.to_string()
 }
+
+/// Context injection for prompt/session lifecycle events. Cursor's
+/// `sessionStart` protocol requires a JSON envelope; the Claude-compatible
+/// harnesses consume plain stdout as additional context.
+pub fn lifecycle_context(harness: Harness, event: &str, reason: &str) -> String {
+    if harness == Harness::Cursor && matches!(event, "session-start" | "SessionStart") {
+        json!({"additional_context": reason}).to_string()
+    } else {
+        prompt_context(reason)
+    }
+}

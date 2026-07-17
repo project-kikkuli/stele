@@ -4,7 +4,18 @@
       {
         "hooks": [
           {
-            "command": "stele hook codex pre-tool-use",
+            "command": "stele hook codex pre-tool-use --scope repo",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "stele hook codex session-start --scope repo",
             "type": "command"
           }
         ],
@@ -15,7 +26,7 @@
       {
         "hooks": [
           {
-            "command": "stele hook codex stop",
+            "command": "stele hook codex stop --scope repo",
             "type": "command"
           }
         ],
@@ -26,7 +37,7 @@
       {
         "hooks": [
           {
-            "command": "stele hook codex prompt",
+            "command": "stele hook codex prompt --scope repo",
             "type": "command"
           }
         ],

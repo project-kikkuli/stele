@@ -33,7 +33,9 @@ pub fn create(sub: &Substrate, rule_id: &str, reason: &str) -> Result<(), String
     let out = Command::new("git")
         .arg("-C")
         .arg(&sub.root)
-        .args(["commit", "--allow-empty", "-m", &message])
+        // `--only` with no paths keeps staged user changes out of the
+        // acknowledgement commit; `--allow-empty` makes that legal.
+        .args(["commit", "--allow-empty", "--only", "-m", &message])
         .output()
         .map_err(|e| format!("git commit: {e}"))?;
     if !out.status.success() {

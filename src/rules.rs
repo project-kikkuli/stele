@@ -1,6 +1,6 @@
 //! Rule evaluation: pure functions of (rule, substrate).
 
-use crate::config::Rule;
+use crate::config::{Rule, Trigger};
 use crate::substrate::Substrate;
 use globset::Glob;
 use std::process::Command;
@@ -29,6 +29,9 @@ fn glob_match(pattern: &str, path: &str) -> bool {
 }
 
 fn in_scope(rule: &Rule, substrate: &Substrate) -> bool {
+    if rule.trigger == Trigger::Always {
+        return true;
+    }
     if rule.scope.is_empty() {
         return !substrate.changed.is_empty();
     }

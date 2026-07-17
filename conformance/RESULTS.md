@@ -1,5 +1,36 @@
 # Conformance validation results
 
+## 2026-07-17 — layered personal/system rules and session preflight
+
+Live sweep after adding system + personal + repository rule layers, scoped
+global/repository hooks, `SessionStart`, and pre-mutation enforcement for
+`trigger = "always"` rules:
+
+| harness | result | detail |
+|---|---|---|
+| codex-global | PASS | no repo `stele.toml`; SessionStart context ✓ PreToolUse gate ✓ primary checkout untouched ✓ |
+| codex | PASS | repository rule corrected; green ✓ artifact ✓ stop gate fired ✓ |
+| cursor-wrap | PASS | repository rule corrected; synthetic stop fired ✓ |
+| hermes | PASS | repository artifact gate corrected the task on retry ✓ |
+| git-pre-push | PASS | red exit 1, green exit 0 |
+| claude-code | NOT RUN | Claude exited before the task: account session limit until 16:30 America/New_York; no hook event fired |
+
+The new `codex-global` conformance case uses an isolated `CODEX_HOME` with a
+real user-level `hooks.json` and a personal config outside the fixture repo.
+It asks Codex to edit from the primary checkout and passes only if the personal
+policy fires while `app.py` remains byte-for-byte unchanged. The latest run
+recorded both `context-injected` and `preflight-blocked`, validating the first
+demo moment through the real harness, not just by invoking the hook CLI.
+
+Hermes was nondeterministic across two runs: the first run recorded a real
+tool block but the model abandoned the task without editing; the immediate
+retry complied and passed. The channel worked in both runs, but agent recovery
+after a block is not deterministic and should remain visible in the record.
+
+The deterministic suite now has 46 integration tests, including primary vs.
+linked-worktree behavior, preflight-before-wrapper-launch, global hook config
+migration/idempotence, and accumulation of system + user + repository rules.
+
 ## 2026-07-17 — `stele conformance` (the built binary, all channels)
 
 All five channels PASS end-to-end through the shipped `stele` binary

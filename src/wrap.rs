@@ -18,6 +18,18 @@ pub fn run(max_loops: u32, prompt: &str, cmd: &[String]) -> i32 {
         return 2;
     }
 
+    // Session preconditions must be satisfied before the hook-less agent gets
+    // its first chance to mutate the checkout. This is what makes personal
+    // `trigger = "always"` rules (for example, worktree-only) meaningful on
+    // wrapped CLIs too.
+    if let Some(verdict) = verdict_now() {
+        if !verdict.preflight().is_empty() {
+            eprintln!("stele wrap: session preflight failed:");
+            eprintln!("{}", engine::render_preflight(&verdict));
+            return 1;
+        }
+    }
+
     let mut argv: Vec<String> = cmd.to_vec();
     if argv[0].contains("cursor-agent") && !argv.iter().any(|a| a == "--output-format") {
         argv.extend(["--output-format".into(), "json".into()]);

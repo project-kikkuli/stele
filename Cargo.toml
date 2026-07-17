@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Declare a rule once; enforce it across every AI coding agent harness."
 license = "MIT"
+repository = "https://github.com/project-kikkuli/stele"
+homepage = "https://github.com/project-kikkuli/stele"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

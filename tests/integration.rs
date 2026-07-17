@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
-use stele::config::{self, Artifact, Rule, Severity};
+use stele::config::{self, Artifact, Rule, Severity, Trigger};
 use stele::emit::{self, Harness};
 use stele::engine;
 use stele::rules;
@@ -70,7 +70,7 @@ path = "x.md"
 "#,
     )
     .unwrap();
-    assert!(config::load(tmp.path())
+    assert!(config::load_repo(tmp.path())
         .unwrap_err()
         .contains("exactly one"));
 }
@@ -90,7 +90,27 @@ check = "true"
 "#,
     )
     .unwrap();
-    assert!(config::load(tmp.path()).unwrap_err().contains("duplicate"));
+    assert!(config::load_repo(tmp.path())
+        .unwrap_err()
+        .contains("duplicate"));
+}
+
+#[test]
+fn config_rejects_scope_on_always_rule() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("stele.toml"),
+        r#"
+[[rule]]
+id = "confused"
+trigger = "always"
+scope = ["src/**"]
+check = "true"
+"#,
+    )
+    .unwrap();
+    let error = config::load_repo(tmp.path()).unwrap_err();
+    assert!(error.contains("cannot be combined"), "{error}");
 }
 
 // ----------------------------------------------------------------- rules
@@ -100,7 +120,9 @@ fn artifact_rule(scope: Vec<String>) -> Rule {
         id: "requirements-doc".into(),
         description: String::new(),
         severity: Severity::Block,
+        trigger: Trigger::Changes,
         scope,
+        acknowledge: true,
         message: String::new(),
         check: None,
         artifact: Some(Artifact {
@@ -176,6 +198,16 @@ fn scope_excludes_win() {
 }
 
 #[test]
+fn always_rule_triggers_on_a_clean_tree() {
+    let (_tmp, root) = fixture();
+    let mut rule = artifact_rule(vec![]);
+    rule.trigger = Trigger::Always;
+    let result = rules::evaluate(&rule, &make_substrate(&root));
+    assert!(result.triggered);
+    assert!(result.red());
+}
+
+#[test]
 fn command_rule_distinguishes_red_from_unmeasurable() {
     let (_tmp, root) = fixture();
     fs::write(root.join("app.py"), "changed\n").unwrap();
@@ -187,7 +219,9 @@ fn command_rule_distinguishes_red_from_unmeasurable() {
         artifact: None,
         description: String::new(),
         severity: Severity::Block,
+        trigger: Trigger::Changes,
         scope: vec![],
+        acknowledge: true,
         message: String::new(),
     };
     let result = rules::evaluate(&red, &sub);
@@ -234,6 +268,29 @@ fn green_cache_round_trips() {
     assert!(!state.is_green_cached("s2"));
 }
 
+#[test]
+fn global_and_repo_hook_noise_state_are_independent() {
+    let (_tmp, root) = fixture();
+    let sub = make_substrate(&root);
+    let global = engine::State::scoped(&sub, "global");
+    let repo = engine::State::scoped(&sub, "repo");
+    assert!(global.take_prompt_slot("same-tree"));
+    assert!(repo.take_prompt_slot("same-tree"));
+    assert!(!global.take_prompt_slot("same-tree"));
+    assert!(!repo.take_prompt_slot("same-tree"));
+}
+
+#[test]
+fn policy_signature_moves_when_external_rule_definition_moves() {
+    let (_tmp, root) = fixture();
+    let sub = make_substrate(&root);
+    let mut rule = artifact_rule(vec![]);
+    let first = engine::policy_signature(&[rule.clone()], &sub.signature);
+    rule.description = "new personal policy text".into();
+    let second = engine::policy_signature(&[rule], &sub.signature);
+    assert_ne!(first, second);
+}
+
 // ------------------------------------------------------------------ emit
 
 #[test]
@@ -252,6 +309,13 @@ fn emit_protocols_match_validated_contracts() {
     assert_eq!(v["action"], "block");
     assert_eq!(v["message"], reason);
     assert_eq!(emit::tool_allow(Harness::Hermes).unwrap(), "{}");
+    let v: serde_json::Value = serde_json::from_str(&emit::lifecycle_context(
+        Harness::Cursor,
+        "session-start",
+        reason,
+    ))
+    .unwrap();
+    assert_eq!(v["additional_context"], reason);
 }
 
 // --------------------------------------------------------------- compile
@@ -259,7 +323,7 @@ fn emit_protocols_match_validated_contracts() {
 #[test]
 fn compile_writes_all_channels_and_is_idempotent() {
     let (_tmp, root) = fixture();
-    let rules = config::load(&root).unwrap();
+    let rules = config::load_repo(&root).unwrap();
 
     let written = stele::compile::run(&root, &rules).unwrap();
     for expected in [
@@ -283,6 +347,9 @@ fn compile_writes_all_channels_and_is_idempotent() {
         again.is_empty(),
         "second compile must be a no-op, wrote {again:?}"
     );
+    let codex = fs::read_to_string(root.join(".codex/hooks.json")).unwrap();
+    assert!(codex.contains("session-start --scope repo"), "{codex}");
+    assert!(codex.contains("pre-tool-use --scope repo"), "{codex}");
 }
 
 #[test]
@@ -294,7 +361,7 @@ fn compile_preserves_existing_user_hooks() {
         r#"{"permissions":{"allow":["Bash(ls)"]},"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"my-own-hook.sh"}]}]}}"#,
     )
     .unwrap();
-    let rules = config::load(&root).unwrap();
+    let rules = config::load_repo(&root).unwrap();
     stele::compile::run(&root, &rules).unwrap();
 
     let doc: serde_json::Value =
@@ -314,7 +381,7 @@ fn compile_refuses_to_clobber_foreign_pre_push() {
     let (_tmp, root) = fixture();
     fs::create_dir_all(root.join(".git/hooks")).unwrap();
     fs::write(root.join(".git/hooks/pre-push"), "#!/bin/sh\necho mine\n").unwrap();
-    let rules = config::load(&root).unwrap();
+    let rules = config::load_repo(&root).unwrap();
     stele::compile::run(&root, &rules).unwrap();
     let body = fs::read_to_string(root.join(".git/hooks/pre-push")).unwrap();
     assert_eq!(
@@ -327,7 +394,7 @@ fn compile_refuses_to_clobber_foreign_pre_push() {
 fn agents_md_managed_block_updates_in_place() {
     let (_tmp, root) = fixture();
     fs::write(root.join("AGENTS.md"), "# My repo\n\nHand-written intro.\n").unwrap();
-    let rules = config::load(&root).unwrap();
+    let rules = config::load_repo(&root).unwrap();
     stele::compile::run(&root, &rules).unwrap();
     stele::compile::run(&root, &rules).unwrap();
     let body = fs::read_to_string(root.join("AGENTS.md")).unwrap();
@@ -340,16 +407,195 @@ fn agents_md_managed_block_updates_in_place() {
     assert!(body.contains("requirements-doc"));
 }
 
+#[test]
+fn global_install_preserves_user_config_migrates_old_hooks_and_is_idempotent() {
+    let home = TempDir::new().unwrap();
+    fs::create_dir_all(home.path().join(".claude")).unwrap();
+    fs::write(
+        home.path().join(".claude/settings.json"),
+        r#"{
+  "permissions": {"allow": ["Bash(ls)"]},
+  "hooks": {
+    "Stop": [{
+      "matcher": "",
+      "hooks": [{"type": "command", "command": "stele hook claude-code stop"}]
+    }]
+  }
+}"#,
+    )
+    .unwrap();
+
+    let written = stele::compile::install_global_at(home.path()).unwrap();
+    for expected in [
+        ".claude/settings.json",
+        ".codex/hooks.json",
+        ".cursor/hooks.json",
+    ] {
+        assert!(
+            written.iter().any(|path| path.ends_with(expected)),
+            "missing {expected}: {written:?}"
+        );
+    }
+    assert!(
+        stele::compile::install_global_at(home.path())
+            .unwrap()
+            .is_empty(),
+        "second install must be a no-op"
+    );
+
+    let claude: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(claude["permissions"]["allow"][0], "Bash(ls)");
+    let stops = claude["hooks"]["Stop"].as_array().unwrap();
+    assert_eq!(stops.len(), 1, "stale Stele hook must be replaced");
+    assert_eq!(
+        stops[0]["hooks"][0]["command"],
+        "stele hook claude-code stop --scope global"
+    );
+    assert_eq!(claude["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    assert_eq!(claude["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+
+    let codex = fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
+    assert!(codex.contains("session-start --scope global"), "{codex}");
+    let cursor = fs::read_to_string(home.path().join(".cursor/hooks.json")).unwrap();
+    assert!(cursor.contains("pre-tool-use --scope global"), "{cursor}");
+}
+
+#[test]
+fn global_install_refuses_to_clobber_invalid_user_json() {
+    let home = TempDir::new().unwrap();
+    fs::create_dir_all(home.path().join(".codex")).unwrap();
+    let path = home.path().join(".codex/hooks.json");
+    fs::write(&path, "{ definitely not json\n").unwrap();
+    let error = stele::compile::install_global_at(home.path()).unwrap_err();
+    assert!(error.contains("not valid JSON"), "{error}");
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        "{ definitely not json\n",
+        "invalid user config must remain byte-for-byte untouched"
+    );
+    assert!(!home.path().join(".claude/settings.json").exists());
+}
+
+#[test]
+fn global_hook_install_accepts_system_rules_without_personal_config() {
+    let home = TempDir::new().unwrap();
+    let system = home.path().join("system-stele.toml");
+    let missing_user = home.path().join("missing-user.toml");
+    fs::write(
+        &system,
+        "[[rule]]\nid = \"system-rule\"\ntrigger = \"always\"\ncheck = \"true\"\n",
+    )
+    .unwrap();
+    let out = Command::new(stele_bin())
+        .args(["install", "global"])
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env(config::USER_CONFIG_ENV, &missing_user)
+        .env(config::SYSTEM_CONFIG_ENV, &system)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(home.path().join(".codex/hooks.json").is_file());
+}
+
+#[test]
+fn hermes_global_install_uses_stable_personal_shim() {
+    let home = TempDir::new().unwrap();
+    fs::create_dir_all(home.path().join(".hermes")).unwrap();
+    fs::write(
+        home.path().join(".hermes/config.yaml"),
+        "model: test\nhooks: {}\n",
+    )
+    .unwrap();
+    let state_dir = home.path().join("personal-stele");
+    stele::compile::install_hermes_at(home.path(), &state_dir).unwrap();
+    stele::compile::install_hermes_at(home.path(), &state_dir).unwrap();
+
+    let config = fs::read_to_string(home.path().join(".hermes/config.yaml")).unwrap();
+    assert!(config.contains(&state_dir.join("hermes-shim.sh").display().to_string()));
+    assert_eq!(config.matches("pre_tool_call:").count(), 1, "{config}");
+    let shim = fs::read_to_string(state_dir.join("hermes-shim.sh")).unwrap();
+    assert!(shim.contains("--scope all"), "{shim}");
+    assert!(!shim.contains("$cwd/stele.toml"), "{shim}");
+
+    let old_home = TempDir::new().unwrap();
+    fs::create_dir_all(old_home.path().join(".hermes")).unwrap();
+    fs::write(
+        old_home.path().join(".hermes/config.yaml"),
+        "hooks:\n  pre_tool_call:\n    - command: \"/tmp/repo/.stele/hermes-shim.sh pre_tool_call\"\n      timeout: 60\n",
+    )
+    .unwrap();
+    let migrated_state = old_home.path().join("personal-stele");
+    stele::compile::install_hermes_at(old_home.path(), &migrated_state).unwrap();
+    let migrated = fs::read_to_string(old_home.path().join(".hermes/config.yaml")).unwrap();
+    assert!(migrated.contains(&migrated_state.display().to_string()));
+    assert!(!migrated.contains("/tmp/repo/.stele"), "{migrated}");
+}
+
 // ------------------------------------------------------- end-to-end hook
 
 fn stele_bin() -> &'static str {
     env!("CARGO_BIN_EXE_stele")
 }
 
-fn run_hook(root: &Path, harness: &str, event: &str, payload: &str) -> (String, i32) {
-    let mut child = Command::new(stele_bin())
-        .args(["hook", harness, event])
+fn stele_command(root: &Path) -> Command {
+    let mut command = Command::new(stele_bin());
+    command
         .current_dir(root)
+        .env(config::DISABLE_GLOBAL_ENV, "1");
+    command
+}
+
+fn global_stele_command(root: &Path, user_config: &Path, system_config: &Path) -> Command {
+    let mut command = Command::new(stele_bin());
+    command
+        .current_dir(root)
+        .env_remove(config::DISABLE_GLOBAL_ENV)
+        .env(config::USER_CONFIG_ENV, user_config)
+        .env(config::SYSTEM_CONFIG_ENV, system_config);
+    command
+}
+
+fn run_global_hook(
+    root: &Path,
+    user_config: &Path,
+    harness: &str,
+    event: &str,
+    payload: &str,
+) -> (String, i32) {
+    let missing_system = user_config.with_extension("missing-system.toml");
+    let mut child = global_stele_command(root, user_config, &missing_system)
+        .args(["hook", harness, event, "--scope", "global"])
+        .env_remove("CLAUDE_PROJECT_DIR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+fn run_hook(root: &Path, harness: &str, event: &str, payload: &str) -> (String, i32) {
+    let mut child = stele_command(root)
+        .args(["hook", harness, event, "--scope", "repo"])
         .env_remove("CLAUDE_PROJECT_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -475,19 +721,11 @@ fn check_exit_codes_distinguish_green_red_unmeasurable() {
     let (_tmp, root) = fixture();
 
     // Nothing changed: green (no rules trigger).
-    let ok = Command::new(stele_bin())
-        .arg("check")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let ok = stele_command(&root).arg("check").output().unwrap();
     assert_eq!(ok.status.code(), Some(0));
 
     fs::write(root.join("app.py"), "v2\n").unwrap();
-    let red = Command::new(stele_bin())
-        .arg("check")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let red = stele_command(&root).arg("check").output().unwrap();
     assert_eq!(red.status.code(), Some(1));
 
     // A check that cannot run is exit 3, not green.
@@ -500,16 +738,174 @@ check = "/nonexistent/checker"
 "#,
     )
     .unwrap();
-    let unmeasurable = Command::new(stele_bin())
-        .arg("check")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let unmeasurable = stele_command(&root).arg("check").output().unwrap();
     assert_eq!(
         unmeasurable.status.code(),
         Some(1),
         "bash exits 127 → findings"
     );
+}
+
+#[test]
+fn personal_worktree_rule_blocks_primary_checkout_before_edit_and_passes_linked_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    sh(
+        &root,
+        "git init -q -b main && git config user.email t@t && git config user.name t",
+    );
+    fs::write(root.join("app.py"), "x = 1\n").unwrap();
+    sh(&root, "git add -A && git commit -qm init");
+
+    let user_config = tmp.path().join("config/stele/stele.toml");
+    let system_config = tmp.path().join("missing-system.toml");
+    let init = global_stele_command(&root, &user_config, &system_config)
+        .args(["init", "--global"])
+        .output()
+        .unwrap();
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let personal = fs::read_to_string(&user_config).unwrap();
+    assert!(personal.contains("trigger = \"always\""), "{personal}");
+    assert!(personal.contains("personal-worktree-only"), "{personal}");
+
+    // A clean primary checkout is red: global rules do not need a repo-local
+    // stele.toml and `always` rules do not need a dirty change-set.
+    let check = global_stele_command(&root, &user_config, &system_config)
+        .arg("check")
+        .output()
+        .unwrap();
+    assert_eq!(check.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&check.stdout).contains("primary checkout"),
+        "{}",
+        String::from_utf8_lossy(&check.stdout)
+    );
+
+    // SessionStart warns before work, and the first mutating tool is denied.
+    let session = format!(r#"{{"cwd":"{}"}}"#, root.display());
+    let (out, code) = run_global_hook(&root, &user_config, "codex", "session-start", &session);
+    assert_eq!(code, 0);
+    assert!(out.contains("personal-worktree-only"), "{out}");
+
+    let mutation = format!(
+        r#"{{"cwd":"{}","tool_name":"apply_patch","tool_input":{{"patch":"x"}}}}"#,
+        root.display()
+    );
+    let (out, _) = run_global_hook(&root, &user_config, "codex", "pre-tool-use", &mutation);
+    let denial: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(denial["hookSpecificOutput"]["permissionDecision"], "deny");
+
+    let read = format!(
+        r#"{{"cwd":"{}","tool_name":"Read","tool_input":{{"path":"app.py"}}}}"#,
+        root.display()
+    );
+    let (out, _) = run_global_hook(&root, &user_config, "codex", "pre-tool-use", &read);
+    assert_eq!(out.trim(), "", "read-only exploration remains available");
+
+    // The starter marks this personal invariant as non-acknowledgeable.
+    let ack = global_stele_command(&root, &user_config, &system_config)
+        .args(["ack", "personal-worktree-only", "-m", "skip it"])
+        .output()
+        .unwrap();
+    assert_eq!(ack.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&ack.stderr).contains("does not allow"));
+
+    // Hook-less harnesses are checked before the wrapped agent process starts.
+    let wrapped = global_stele_command(&root, &user_config, &system_config)
+        .args([
+            "wrap",
+            "--prompt",
+            "edit app.py",
+            "--",
+            "/definitely/not/an/agent",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(wrapped.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&wrapped.stderr);
+    assert!(stderr.contains("session preflight failed"), "{stderr}");
+    assert!(!stderr.contains("failed to run agent"), "{stderr}");
+
+    // The exact same personal config goes green in a linked worktree.
+    let linked = tmp.path().join("agent-worktree");
+    let status = Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "agent-work"])
+        .arg(&linked)
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let check = global_stele_command(&linked, &user_config, &system_config)
+        .arg("check")
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[test]
+fn system_user_and_repository_rules_accumulate() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    sh(
+        &root,
+        "git init -q -b main && git config user.email t@t && git config user.name t",
+    );
+    fs::write(root.join("app.py"), "x = 1\n").unwrap();
+    fs::write(
+        root.join("stele.toml"),
+        "[[rule]]\nid = \"repo-rule\"\ncheck = \"true\"\n",
+    )
+    .unwrap();
+    sh(&root, "git add -A && git commit -qm init");
+    fs::write(root.join("app.py"), "x = 2\n").unwrap();
+
+    let user = tmp.path().join("user.toml");
+    let system = tmp.path().join("system.toml");
+    fs::write(
+        &user,
+        "[[rule]]\nid = \"user-rule\"\ntrigger = \"always\"\ncheck = \"true\"\n",
+    )
+    .unwrap();
+    fs::write(
+        &system,
+        "[[rule]]\nid = \"system-rule\"\ntrigger = \"always\"\ncheck = \"true\"\n",
+    )
+    .unwrap();
+
+    let out = global_stele_command(&root, &user, &system)
+        .arg("check")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("3 rule(s) measured"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // IDs are unique across all active layers; ambiguity fails measurement.
+    fs::write(
+        &user,
+        "[[rule]]\nid = \"system-rule\"\ntrigger = \"always\"\ncheck = \"true\"\n",
+    )
+    .unwrap();
+    let out = global_stele_command(&root, &user, &system)
+        .arg("check")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("duplicate rule id"));
 }
 
 // ----------------------------------------------------- merge attribution
@@ -580,17 +976,12 @@ fn acked_rule_stops_gating_everywhere() {
     sh(&root, "git add -A && git commit -qm wip");
 
     // Red without ack.
-    let out = Command::new(stele_bin())
-        .arg("check")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out = stele_command(&root).arg("check").output().unwrap();
     assert_eq!(out.status.code(), Some(1));
 
     // `stele ack` records the trailer...
-    let out = Command::new(stele_bin())
+    let out = stele_command(&root)
         .args(["ack", "requirements-doc", "-m", "docs ship separately"])
-        .current_dir(&root)
         .output()
         .unwrap();
     assert!(
@@ -600,11 +991,7 @@ fn acked_rule_stops_gating_everywhere() {
     );
 
     // ...check passes with an acknowledgement note...
-    let out = Command::new(stele_bin())
-        .arg("check")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out = stele_command(&root).arg("check").output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&out.stdout).contains("acknowledged"));
 
@@ -614,23 +1001,87 @@ fn acked_rule_stops_gating_everywhere() {
 }
 
 #[test]
+fn ack_commit_does_not_capture_staged_user_changes() {
+    let (_tmp, root) = fixture();
+    sh(&root, "git checkout -qb feature");
+    fs::write(root.join("app.py"), "v2\n").unwrap();
+    sh(&root, "git add app.py && git commit -qm work");
+    fs::write(root.join("keep-staged.txt"), "user work\n").unwrap();
+    sh(&root, "git add keep-staged.txt");
+
+    let out = stele_command(&root)
+        .args(["ack", "requirements-doc", "-m", "intentional"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let staged = Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&staged.stdout).trim(),
+        "keep-staged.txt"
+    );
+    let committed = Command::new("git")
+        .args(["show", "--pretty=format:", "--name-only", "HEAD"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&committed.stdout).trim().is_empty());
+}
+
+#[test]
 fn ack_refuses_unknown_or_passing_rules() {
     let (_tmp, root) = fixture();
-    let out = Command::new(stele_bin())
+    let out = stele_command(&root)
         .args(["ack", "no-such-rule", "-m", "x"])
-        .current_dir(&root)
         .output()
         .unwrap();
     assert!(!out.status.success());
 
     // Rule exists but is not failing (no changes): refuse pre-emptive ack.
-    let out = Command::new(stele_bin())
+    let out = stele_command(&root)
         .args(["ack", "requirements-doc", "-m", "x"])
-        .current_dir(&root)
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("not currently failing"));
+}
+
+#[test]
+fn trailer_cannot_bypass_non_acknowledgeable_rule() {
+    let (_tmp, root) = fixture();
+    fs::write(
+        root.join("stele.toml"),
+        r###"[[rule]]
+id = "requirements-doc"
+acknowledge = false
+
+[rule.artifact]
+path = "requirements.md"
+sections = ["# Requirements"]
+"###,
+    )
+    .unwrap();
+    sh(
+        &root,
+        "git add stele.toml && git commit -qm config && git checkout -qb feature && git commit --allow-empty -qm $'attempted bypass\n\nStele-Ack: requirements-doc'",
+    );
+    fs::write(root.join("app.py"), "v2\n").unwrap();
+
+    let verdict = engine::check(&config::load_repo(&root).unwrap(), &make_substrate(&root));
+    assert!(!verdict.blocking().is_empty());
+    assert!(verdict.acknowledged().is_empty());
+
+    let payload = r#"{"tool_name":"terminal","tool_input":{"command":"touch app.py"}}"#;
+    let (out, _) = run_hook(&root, "hermes", "pre_tool_call", payload);
+    let response: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(response["action"], "block");
 }
 
 // ----------------------------------------------------- nudge + prompt gate
@@ -653,11 +1104,7 @@ fn nudge_never_blocks_but_speaks_in_prompt_once() {
     fs::write(root.join("app.py"), "v2\n").unwrap();
 
     // check: exit 0 with advisory output.
-    let out = Command::new(stele_bin())
-        .arg("check")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out = stele_command(&root).arg("check").output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&out.stdout).contains("advisory"));
 
@@ -786,13 +1233,9 @@ fn iso_timestamps() {
 #[test]
 fn doctor_reports_wiring_state() {
     let (_tmp, root) = fixture();
-    let rules = config::load(&root).unwrap();
+    let rules = config::load_repo(&root).unwrap();
     stele::compile::run(&root, &rules).unwrap();
-    let out = Command::new(stele_bin())
-        .arg("doctor")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out = stele_command(&root).arg("doctor").output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("stele doctor"));
     assert!(text.contains(".claude/settings.json wired"), "{text}");
@@ -802,7 +1245,7 @@ fn doctor_reports_wiring_state() {
 #[test]
 fn compile_wires_pre_tool_use_guard() {
     let (_tmp, root) = fixture();
-    let rules = config::load(&root).unwrap();
+    let rules = config::load_repo(&root).unwrap();
     stele::compile::run(&root, &rules).unwrap();
     let body = fs::read_to_string(root.join(".claude/settings.json")).unwrap();
     assert!(
@@ -855,25 +1298,27 @@ fn hermes_gatekeeper_blocks_the_call_that_would_create_the_red() {
 // ------------------------------------------------------------ ci generation
 
 #[test]
-fn generated_ci_self_hosts_in_the_stele_repo_and_https_ifies_ssh_origins() {
+fn generated_ci_self_hosts_in_stele_and_installs_stele_not_the_consumer_repo() {
     // A repo that IS the stele source builds from its own checkout.
     let (_tmp, root) = fixture();
     fs::write(root.join("Cargo.toml"), "[package]\nname = \"stele\"\n").unwrap();
-    let rules = config::load(&root).unwrap();
+    let rules = config::load_repo(&root).unwrap();
     stele::compile::run(&root, &rules).unwrap();
     let wf = fs::read_to_string(root.join(".github/workflows/stele.yml")).unwrap();
     assert!(wf.contains("cargo install --path . --locked"), "{wf}");
 
-    // An ordinary repo with an ssh origin gets an https install source —
-    // runners can't fetch git@ URLs.
+    // An ordinary repo installs Stele itself, never the consumer repository.
     let (_tmp2, root2) = fixture();
     sh(
         &root2,
         "git remote add origin git@github.com:acme/widgets.git",
     );
-    let rules2 = config::load(&root2).unwrap();
+    let rules2 = config::load_repo(&root2).unwrap();
     stele::compile::run(&root2, &rules2).unwrap();
     let wf2 = fs::read_to_string(root2.join(".github/workflows/stele.yml")).unwrap();
-    assert!(wf2.contains("https://github.com/acme/widgets.git"), "{wf2}");
-    assert!(!wf2.contains("git@github.com"), "{wf2}");
+    assert!(
+        wf2.contains("https://github.com/project-kikkuli/stele"),
+        "{wf2}"
+    );
+    assert!(!wf2.contains("acme/widgets"), "{wf2}");
 }

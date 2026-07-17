@@ -1,7 +1,7 @@
 # Contributing
 
 ```console
-$ cargo test                 # 30+ integration tests, no agents needed
+$ cargo test                 # 40+ integration tests, no agents needed
 $ cargo fmt && cargo clippy --all-targets -- -D warnings
 $ cargo run -- check         # the repo's own rules (see stele.toml)
 ```
@@ -31,6 +31,7 @@ memory, and it has caught a real bug on every sweep so far.
 ## Layout
 
 - `src/substrate.rs` — the measurement substrate (the only code allowed to run git)
+- `src/config.rs` — system + personal + repository rule discovery
 - `src/rules.rs`, `src/engine.rs` — rule evaluation, noise gates, telemetry
 - `src/emit.rs` — per-harness response protocols (the only place dialects live)
 - `src/hook.rs` — the single fail-open hook entrypoint

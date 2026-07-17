@@ -17,10 +17,11 @@
 //! blocking everywhere and reported as acknowledged.
 
 use crate::ack;
-use crate::config::{Rule, Severity};
+use crate::config::{Rule, Severity, Trigger};
 use crate::rules::{self, RuleResult};
 use crate::substrate::Substrate;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -42,14 +43,17 @@ impl Verdict {
     pub fn blocking(&self) -> Vec<&RuleResult> {
         self.red()
             .into_iter()
-            .filter(|r| r.rule.severity == Severity::Block && !self.acked.contains(&r.rule.id))
+            .filter(|r| {
+                r.rule.severity == Severity::Block
+                    && (!r.rule.acknowledge || !self.acked.contains(&r.rule.id))
+            })
             .collect()
     }
     /// Failing rules that are acknowledged (reported, never gate).
     pub fn acknowledged(&self) -> Vec<&RuleResult> {
         self.red()
             .into_iter()
-            .filter(|r| self.acked.contains(&r.rule.id))
+            .filter(|r| r.rule.acknowledge && self.acked.contains(&r.rule.id))
             .collect()
     }
     /// Failing nudge-severity rules (reported, never gate).
@@ -61,6 +65,15 @@ impl Verdict {
     }
     pub fn errors(&self) -> Vec<&RuleResult> {
         self.results.iter().filter(|r| r.error.is_some()).collect()
+    }
+    /// Failing, unacknowledged session preconditions. These may gate the first
+    /// mutating tool call because they are expected to be fixed outside the
+    /// current worktree rather than through ordinary code edits.
+    pub fn preflight(&self) -> Vec<&RuleResult> {
+        self.blocking()
+            .into_iter()
+            .filter(|r| r.rule.trigger == Trigger::Always)
+            .collect()
     }
     pub fn is_green(&self) -> bool {
         self.red().is_empty() && self.errors().is_empty()
@@ -77,9 +90,22 @@ pub fn check(rule_set: &[Rule], substrate: &Substrate) -> Verdict {
     }
 }
 
+/// Noise/cache key for a measured tree under a particular effective policy.
+/// Repository config already moves the snapshot hash; personal and system
+/// config live outside the repository, so their definitions must be included
+/// explicitly or a changed global rule could inherit a stale green verdict.
+pub fn policy_signature(rule_set: &[Rule], substrate_signature: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(substrate_signature.as_bytes());
+    hasher.update([0]);
+    hasher.update(format!("{rule_set:#?}").as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 /// Per-repo state under `<git-dir>/stele/`.
 pub struct State {
     dir: PathBuf,
+    namespace: Option<String>,
 }
 
 impl State {
@@ -87,19 +113,40 @@ impl State {
         Self::at(substrate.git_dir.clone())
     }
 
+    /// Separate noise/caching state for repository and global hook layers.
+    /// Both hook sources can be active in the same harness process; without a
+    /// namespace they would consume each other's prompt and block slots.
+    pub fn scoped(substrate: &Substrate, namespace: &str) -> Self {
+        let mut state = Self::at(substrate.git_dir.clone());
+        if namespace != "all" {
+            state.namespace = Some(namespace.to_string());
+        }
+        state
+    }
+
     /// For light-weight logging before a full substrate exists.
     pub fn at(git_dir: PathBuf) -> Self {
         let dir = git_dir.join("stele");
         let _ = fs::create_dir_all(&dir);
-        State { dir }
+        State {
+            dir,
+            namespace: None,
+        }
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        match &self.namespace {
+            Some(namespace) => self.dir.join(format!("{name}-{namespace}")),
+            None => self.dir.join(name),
+        }
     }
 
     fn read(&self, name: &str) -> String {
-        fs::read_to_string(self.dir.join(name)).unwrap_or_default()
+        fs::read_to_string(self.path(name)).unwrap_or_default()
     }
 
     fn write(&self, name: &str, value: &str) {
-        let _ = fs::write(self.dir.join(name), value);
+        let _ = fs::write(self.path(name), value);
     }
 
     /// A change-set already measured green stays silent for free until it moves.
@@ -180,16 +227,33 @@ pub fn iso_now() -> String {
 /// The agent-facing message: findings plus exact remediation, in the "failing
 /// check output" register agents are trained to fix. Acked rules are omitted.
 pub fn render_reason(verdict: &Verdict) -> String {
-    render(verdict, &verdict.blocking(), "violates repository rules")
+    render(
+        verdict,
+        &verdict.blocking(),
+        "this change-set violates active rules",
+    )
 }
 
 /// Nudge-only variant for the prompt channel.
 pub fn render_nudges(verdict: &Verdict) -> String {
-    render(verdict, &verdict.nudges(), "has advisory findings")
+    render(
+        verdict,
+        &verdict.nudges(),
+        "this change-set has advisory findings",
+    )
 }
 
-fn render(verdict: &Verdict, results: &[&RuleResult], verb: &str) -> String {
-    let mut out = format!("stele: this change-set {verb}.\n");
+/// Session-precondition variant for a tool gate.
+pub fn render_preflight(verdict: &Verdict) -> String {
+    render(
+        verdict,
+        &verdict.preflight(),
+        "this session violates preflight rules",
+    )
+}
+
+fn render(verdict: &Verdict, results: &[&RuleResult], headline: &str) -> String {
+    let mut out = format!("stele: {headline}.\n");
     for result in results {
         out.push_str(&format!("\nrule `{}`", result.rule.id));
         if !result.rule.description.is_empty() {
@@ -227,9 +291,13 @@ fn render(verdict: &Verdict, results: &[&RuleResult], verb: &str) -> String {
                 .join(", ")
         ));
     }
-    out.push_str(
-        "\nFix the findings above before finishing (or, if intentional, run \
-         `stele ack <rule-id> -m \"why\"`). Run `stele check` to re-verify.",
-    );
+    if results.iter().any(|r| r.rule.acknowledge) {
+        out.push_str(
+            "\nFix the findings above before finishing (or, if intentional, run \
+             `stele ack <rule-id> -m \"why\"`). Run `stele check` to re-verify.",
+        );
+    } else {
+        out.push_str("\nFix the findings above, then run `stele check` to re-verify.");
+    }
     out
 }
