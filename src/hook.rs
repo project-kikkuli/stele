@@ -42,10 +42,10 @@ fn run_inner(harness_name: &str, event: &str, scope: config::LoadScope) -> Resul
     }
 
     let Ok(sub) = substrate::compute(&root) else {
-        return Ok(0);
+        return Ok(fail_open(harness)); // e.g. not a git worktree
     };
     let Ok(rule_set) = config::load_scope(&sub.root, scope) else {
-        return Ok(0); // no rules in this hook's layer: stay silent
+        return Ok(fail_open(harness)); // no rules in this hook's layer: stay silent
     };
     let state = State::scoped(&sub, scope.name());
     let policy_signature = engine::policy_signature(&rule_set, &sub.signature);
@@ -89,6 +89,18 @@ fn run_inner(harness_name: &str, event: &str, scope: config::LoadScope) -> Resul
 
 fn event_is_stop(event: &str) -> bool {
     matches!(event, "stop" | "Stop" | "session-end" | "SessionEnd")
+}
+
+/// A fail-open exit that keeps each harness's "allow" contract. Hermes' gate
+/// treats an empty response as undefined, so it needs an explicit `{}`; every
+/// other harness treats silence as allow. This lets the Hermes shim be a bare
+/// `exec stele hook` — stele reads `cwd` from the payload and self-scopes,
+/// emitting the allow itself when the directory has no active Stele rules.
+fn fail_open(harness: Harness) -> i32 {
+    if let Some(allow) = emit::tool_allow(harness) {
+        println!("{allow}");
+    }
+    0
 }
 
 fn resolve_root(harness: Harness, payload: &Value) -> PathBuf {

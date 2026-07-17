@@ -1,5 +1,17 @@
 # Conformance validation results
 
+## 2026-07-17 — Hermes shim carries no runtime dependencies
+
+The generated Hermes shim is now a bare `exec stele hook hermes pre_tool_call
+--scope all`. Previously it pre-parsed the payload with `python3` to extract
+`cwd` and `cd` into it — an undeclared runtime dependency on any machine running
+Hermes. `stele hook` already resolves `cwd` from the payload (`resolve_root`) and
+self-scopes, so the parse was redundant. To preserve the one behavior the shim
+uniquely guaranteed — an explicit `{}` allow when the directory is not a git
+worktree, since Hermes treats empty stdout as undefined — the hook's fail-open
+exits now emit the per-harness allow themselves (`fail_open`). Covered by
+`hermes_gate_fails_open_with_an_explicit_allow_outside_a_repo`.
+
 ## 2026-07-17 — reversible personal install and ergonomic launcher
 
 Personal dogfooding now has one symmetric lifecycle:

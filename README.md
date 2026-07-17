@@ -15,6 +15,11 @@ Until the first crates.io release, install from the repository:
 $ cargo install --git https://github.com/project-kikkuli/stele.git --locked
 ```
 
+Stele runs rule checks and its generated hooks through a POSIX shell (`bash`),
+so Linux and macOS are first-class. On Windows, run stele under WSL or Git Bash;
+native `cmd`/PowerShell is not yet supported (the system-policy path below still
+resolves, but checks need `bash`).
+
 For a repository-owned policy:
 
 ```console
@@ -83,9 +88,9 @@ Uninstall removes only Stele-owned entries, including the Hermes shim, and
 preserves every unrelated user hook. Runtime caches and telemetry live under
 `.git/stele/`; they cannot be committed or pushed.
 
-Machine or organization policy can live at `/etc/stele/stele.toml` (Windows:
-`%PROGRAMDATA%\\stele\\stele.toml`). Provision that file together with managed
-agent hooks and on CI runners. `STELE_USER_CONFIG` and `STELE_SYSTEM_CONFIG`
+Machine or organization policy can live at `/etc/stele/stele.toml` (under WSL/Git
+Bash on Windows, `%PROGRAMDATA%\\stele\\stele.toml`). Provision that file together
+with managed agent hooks and on CI runners. `STELE_USER_CONFIG` and `STELE_SYSTEM_CONFIG`
 override both paths; `XDG_CONFIG_HOME` is honored for the personal config.
 
 Rules accumulate in this order:

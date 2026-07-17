@@ -6,6 +6,10 @@ description = "Declare a rule once; enforce it across every AI coding agent harn
 license = "MIT"
 repository = "https://github.com/project-kikkuli/stele"
 homepage = "https://github.com/project-kikkuli/stele"
+documentation = "https://github.com/project-kikkuli/stele"
+readme = "README.md"
+keywords = ["ai", "agent", "hooks", "policy", "governance"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -645,6 +645,14 @@ fn hermes_global_install_uses_stable_personal_shim() {
     let shim = fs::read_to_string(state_dir.join("hermes-shim.sh")).unwrap();
     assert!(shim.contains("--scope all"), "{shim}");
     assert!(!shim.contains("$cwd/stele.toml"), "{shim}");
+    // The shim must carry no undeclared runtime dependencies: stele reads `cwd`
+    // from the payload and self-scopes, so there is no in-shim JSON parsing.
+    assert!(!shim.contains("python"), "{shim}");
+    assert!(
+        shim.trim_end()
+            .ends_with("exec stele hook hermes pre_tool_call --scope all"),
+        "{shim}"
+    );
 
     let old_home = TempDir::new().unwrap();
     fs::create_dir_all(old_home.path().join(".hermes")).unwrap();
@@ -1583,6 +1591,24 @@ fn hermes_gatekeeper_blocks_the_call_that_would_create_the_red() {
     .unwrap();
     let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &write);
     assert_eq!(out.trim(), "{}", "green tree passes: {out}");
+}
+
+#[test]
+fn hermes_gate_fails_open_with_an_explicit_allow_outside_a_repo() {
+    // The shim is a bare `exec stele hook`, so stele must emit `{}` itself when
+    // `cwd` is not a git worktree — Hermes treats empty stdout as undefined.
+    let outside = TempDir::new().unwrap();
+    let payload = format!(
+        r#"{{"cwd": "{}", "tool_name": "write_file", "tool_input": {{"path": "app.py"}}}}"#,
+        outside.path().display()
+    );
+    let (out, code) = run_hook(outside.path(), "hermes", "pre_tool_call", &payload);
+    assert_eq!(
+        out.trim(),
+        "{}",
+        "must allow explicitly outside a repo: {out}"
+    );
+    assert_eq!(code, 0, "fail-open exit: {code}");
 }
 
 // ------------------------------------------------------------ ci generation
