@@ -12,7 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const TASK: &str = "Add a greet(name) function to app.py that returns f'Hello, {name}!'. Keep the change minimal.";
+const TASK: &str =
+    "Add a greet(name) function to app.py that returns f'Hello, {name}!'. Keep the change minimal.";
 
 pub struct Outcome {
     pub harness: String,
@@ -21,7 +22,13 @@ pub struct Outcome {
 }
 
 pub fn run(harnesses: &[String]) -> i32 {
-    let all = ["claude-code", "codex", "cursor-wrap", "hermes", "git-pre-push"];
+    let all = [
+        "claude-code",
+        "codex",
+        "cursor-wrap",
+        "hermes",
+        "git-pre-push",
+    ];
     let selected: Vec<&str> = if harnesses.is_empty() {
         all.to_vec()
     } else {
@@ -80,30 +87,60 @@ fn run_one(harness: &str) -> Result<Outcome, String> {
     match harness {
         "claude-code" => {
             require("claude")?;
-            agent(dir, "claude", &[
-                "-p", TASK, "--dangerously-skip-permissions", "--model", "sonnet",
-            ], &[])?;
+            agent(
+                dir,
+                "claude",
+                &[
+                    "-p",
+                    TASK,
+                    "--dangerously-skip-permissions",
+                    "--model",
+                    "sonnet",
+                ],
+                &[],
+            )?;
         }
         "codex" => {
             require("codex")?;
-            agent(dir, "codex", &[
-                "exec",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--dangerously-bypass-hook-trust",
-                TASK,
-            ], &[])?;
+            agent(
+                dir,
+                "codex",
+                &[
+                    "exec",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "--dangerously-bypass-hook-trust",
+                    TASK,
+                ],
+                &[],
+            )?;
         }
         "cursor-wrap" => {
             require("cursor-agent")?;
             let stele = std::env::current_exe().map_err(|e| e.to_string())?;
-            agent(dir, stele.to_str().unwrap_or("stele"), &[
-                "wrap", "--prompt", TASK, "--", "cursor-agent", "-p", "--force",
-            ], &[])?;
+            agent(
+                dir,
+                stele.to_str().unwrap_or("stele"),
+                &[
+                    "wrap",
+                    "--prompt",
+                    TASK,
+                    "--",
+                    "cursor-agent",
+                    "-p",
+                    "--force",
+                ],
+                &[],
+            )?;
         }
         "hermes" => {
             require("hermes")?;
             let _guard = HermesWiring::install(dir)?;
-            agent(dir, "hermes", &["--yolo", "-z", TASK], &[("HERMES_ACCEPT_HOOKS", "1")])?;
+            agent(
+                dir,
+                "hermes",
+                &["--yolo", "-z", TASK],
+                &[("HERMES_ACCEPT_HOOKS", "1")],
+            )?;
         }
         "git-pre-push" => {
             // Environment tier: no agent needed. Red worktree must make the
@@ -165,8 +202,12 @@ fn provision(harness: &str) -> Result<Fixture, String> {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    sh(&dir, "git init -qb main && git config user.email t@t && git config user.name stele")?;
-    fs::write(dir.join("app.py"), "def add(a, b):\n    return a + b\n").map_err(|e| e.to_string())?;
+    sh(
+        &dir,
+        "git init -qb main && git config user.email t@t && git config user.name stele",
+    )?;
+    fs::write(dir.join("app.py"), "def add(a, b):\n    return a + b\n")
+        .map_err(|e| e.to_string())?;
     fs::write(
         dir.join("stele.toml"),
         r###"[[rule]]
@@ -198,7 +239,10 @@ sections = ["# Requirements", "## Functional", "## Risks"]
     // which would leave the gate untested (observed live: codex and cursor
     // created the artifact from AGENTS.md alone).
     let _ = fs::remove_file(dir.join("AGENTS.md"));
-    sh(&dir, "git add -A && git commit -qm 'fixture: initial state'")?;
+    sh(
+        &dir,
+        "git add -A && git commit -qm 'fixture: initial state'",
+    )?;
     Ok(Fixture(dir))
 }
 
@@ -233,7 +277,10 @@ fn agent(dir: &Path, bin: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<
         eprintln!(
             "   ({bin} exited {:?}: {})",
             out.status.code(),
-            String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("")
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("")
         );
     }
     Ok(())
@@ -275,7 +322,8 @@ impl HermesWiring {
     fn install(fixture: &Path) -> Result<Self, String> {
         let home = std::env::var("HOME").map_err(|_| "no $HOME")?;
         let config = Path::new(&home).join(".hermes/config.yaml");
-        let original = fs::read_to_string(&config).map_err(|e| format!("{}: {e}", config.display()))?;
+        let original =
+            fs::read_to_string(&config).map_err(|e| format!("{}: {e}", config.display()))?;
         let shim = fixture.join(".stele/hermes-shim.sh");
         let entry = format!(
             "hooks:\n  pre_tool_call:\n    - command: \"{} pre_tool_call\"\n      timeout: 60",
@@ -286,7 +334,10 @@ impl HermesWiring {
         } else if !original.lines().any(|l| l.starts_with("hooks:")) {
             format!("{}\n\n{entry}\n", original.trim_end())
         } else {
-            return Err("~/.hermes/config.yaml has a custom hooks section; run hermes conformance manually".into());
+            return Err(
+                "~/.hermes/config.yaml has a custom hooks section; run hermes conformance manually"
+                    .into(),
+            );
         };
         fs::write(&config, updated).map_err(|e| e.to_string())?;
         Ok(HermesWiring { config, original })

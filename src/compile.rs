@@ -33,7 +33,12 @@ pub fn run(root: &Path, rules: &[Rule]) -> Result<Vec<String>, String> {
         true,
         &mut written,
     )?;
-    merge_claude_style(&root.join(".codex/hooks.json"), "codex", false, &mut written)?;
+    merge_claude_style(
+        &root.join(".codex/hooks.json"),
+        "codex",
+        false,
+        &mut written,
+    )?;
     merge_claude_style(
         &root.join(".devin/hooks.v1.json"),
         "devin-cli",
@@ -106,7 +111,11 @@ fn merge_claude_style(
         }
     }
 
-    write_file(path, &format!("{}\n", serde_json::to_string_pretty(&doc).unwrap()), written)
+    write_file(
+        path,
+        &format!("{}\n", serde_json::to_string_pretty(&doc).unwrap()),
+        written,
+    )
 }
 
 fn write_cursor(path: &Path, written: &mut Vec<String>) -> Result<(), String> {
@@ -130,7 +139,11 @@ fn write_cursor(path: &Path, written: &mut Vec<String>) -> Result<(), String> {
     if !arr.iter().any(|e| e["command"].as_str() == Some(&cmd)) {
         arr.push(json!({"command": cmd, "timeout": 30}));
     }
-    write_file(path, &format!("{}\n", serde_json::to_string_pretty(&doc).unwrap()), written)
+    write_file(
+        path,
+        &format!("{}\n", serde_json::to_string_pretty(&doc).unwrap()),
+        written,
+    )
 }
 
 /// Hermes hooks are global-only (~/.hermes/config.yaml), so the repo carries a
@@ -179,10 +192,28 @@ fn write_git_hook(root: &Path, written: &mut Vec<String>) -> Result<(), String> 
     Ok(())
 }
 
+/// SSH remotes (git@host:org/repo.git) are unusable from a CI runner without
+/// deploy keys; rewrite to https so `cargo install --git` can fetch. (Found by
+/// auditing our own generated workflow — an ssh origin produced a terminus
+/// that could never run.)
+fn https_origin(origin: &str) -> String {
+    if let Some(rest) = origin.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            return format!("https://{host}/{path}");
+        }
+    }
+    origin.to_string()
+}
+
 fn write_ci(root: &Path, written: &mut Vec<String>) -> Result<(), String> {
     let path = root.join(".github/workflows/stele.yml");
-    // Install from this repo's own origin when it has one; the env var at the
-    // top is the single obvious thing to edit when publishing elsewhere.
+    // Self-hosting: when this repo IS the stele source, build from the
+    // checkout — works for private forks and always tests the tree under CI.
+    let is_stele_source = std::fs::read_to_string(root.join("Cargo.toml"))
+        .map(|t| t.contains("name = \"stele\""))
+        .unwrap_or(false);
+    // Otherwise install from this repo's own origin when it has one; the env
+    // var at the top is the single obvious thing to edit when publishing.
     let origin = std::process::Command::new("git")
         .arg("-C")
         .arg(root)
@@ -190,14 +221,16 @@ fn write_ci(root: &Path, written: &mut Vec<String>) -> Result<(), String> {
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .map(|o| https_origin(String::from_utf8_lossy(&o.stdout).trim()))
         .unwrap_or_default();
-    let install = if origin.is_empty() {
+    let install = if is_stele_source {
+        "cargo install --path . --locked".to_string()
+    } else if origin.is_empty() {
         "cargo install stele --locked".to_string()
     } else {
-        format!("cargo install --git ${{{{ env.STELE_SOURCE }}}} --locked")
+        "cargo install --git ${{ env.STELE_SOURCE }} --locked".to_string()
     };
-    let env_block = if origin.is_empty() {
+    let env_block = if is_stele_source || origin.is_empty() {
         String::new()
     } else {
         format!("env:\n  STELE_SOURCE: {origin}\n")
@@ -279,7 +312,9 @@ fn write_file(path: &Path, content: &str, written: &mut Vec<String>) -> Result<(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    let unchanged = fs::read_to_string(path).map(|t| t == content).unwrap_or(false);
+    let unchanged = fs::read_to_string(path)
+        .map(|t| t == content)
+        .unwrap_or(false);
     if !unchanged {
         fs::write(path, content).map_err(|e| format!("{}: {e}", path.display()))?;
         written.push(path.display().to_string());

@@ -1,0 +1,16 @@
+# stele, governed by stele.
+
+[[rule]]
+id = "tests-move-with-src"
+description = "engine changes ship with test changes"
+severity = "block"
+scope = ["src/**"]
+check = "printf '%s\n' \"$STELE_CHANGED\" | grep -q '^tests/' || { echo '✗ src/ changed but tests/ untouched'; exit 1; }"
+message = "If this is a pure refactor with no behavior change, `stele ack tests-move-with-src -m \"why\"`."
+
+[[rule]]
+id = "conformance-results-current"
+description = "channel-behavior changes update the empirical record"
+severity = "nudge"
+scope = ["src/hook.rs", "src/emit.rs", "src/conformance.rs", "src/wrap.rs"]
+check = "printf '%s\n' \"$STELE_CHANGED\" | grep -q '^conformance/RESULTS.md$' || { echo '✗ enforcement-channel code changed but conformance/RESULTS.md was not updated'; exit 1; }"

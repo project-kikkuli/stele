@@ -137,7 +137,10 @@ pub fn compute(start: &Path) -> Result<Substrate, String> {
             let obj_real = git_dir.join("objects");
             let envs: Vec<(String, String)> = vec![
                 ("GIT_INDEX_FILE".into(), index_file.display().to_string()),
-                ("GIT_OBJECT_DIRECTORY".into(), obj_tmp.0.display().to_string()),
+                (
+                    "GIT_OBJECT_DIRECTORY".into(),
+                    obj_tmp.0.display().to_string(),
+                ),
                 (
                     "GIT_ALTERNATE_OBJECT_DIRECTORIES".into(),
                     obj_real.display().to_string(),
@@ -148,7 +151,10 @@ pub fn compute(start: &Path) -> Result<Substrate, String> {
 
             let made = (|| -> Option<(String, String)> {
                 git_env(&root, &env_refs, &["add", "-A"]).ok()?;
-                let tree = git_env(&root, &env_refs, &["write-tree"]).ok()?.trim().to_string();
+                let tree = git_env(&root, &env_refs, &["write-tree"])
+                    .ok()?
+                    .trim()
+                    .to_string();
                 let mut parent_args: Vec<String> = Vec::new();
                 let head = git_ok(&root, &["rev-parse", "--verify", "-q", "HEAD"]);
                 if !head.trim().is_empty() {
@@ -173,17 +179,14 @@ pub fn compute(start: &Path) -> Result<Substrate, String> {
                 // — with MERGE_HEAD parents this lands on the mainline tip
                 // mid-merge, so incoming mainline work is excluded.
                 let range = format!("{diff_base}...{commit}");
-                let changed: Vec<String> = git_env(
-                    &root,
-                    &env_refs,
-                    &["diff", "--name-only", &range],
-                )
-                .unwrap_or_default()
-                .split_whitespace()
-                .map(str::to_string)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
+                let changed: Vec<String> =
+                    git_env(&root, &env_refs, &["diff", "--name-only", &range])
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
                 return Ok(Substrate {
                     root,
                     git_dir,

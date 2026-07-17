@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "stop": [
+      {
+        "command": "stele hook cursor stop",
+        "timeout": 30
+      }
+    ]
+  },
+  "version": 1
+}

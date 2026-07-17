@@ -12,7 +12,7 @@ use crate::engine::{self, State, DEFAULT_MAX_BLOCKS};
 use crate::substrate;
 use serde_json::Value;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn run(harness_name: &str, event: &str) -> i32 {
     // Everything inside is fail-open; the wrapper only translates errors.
@@ -70,9 +70,15 @@ fn run_inner(harness_name: &str, event: &str) -> Result<i32, String> {
         "prompt" | "user-prompt-submit" => {
             handle_prompt(harness, event, &state, &sub.signature, &verdict)
         }
-        "pre-tool-use" | "pre_tool_call" => {
-            handle_toolgate(harness, event, &state, &sub, &verdict, &payload_text, &payload)
-        }
+        "pre-tool-use" | "pre_tool_call" => handle_toolgate(
+            harness,
+            event,
+            &state,
+            &sub,
+            &verdict,
+            &payload_text,
+            &payload,
+        ),
         _ => Ok(0),
     }
 }
@@ -102,10 +108,8 @@ fn resolve_root(harness: Harness, payload: &Value) -> PathBuf {
 }
 
 /// Telemetry for paths that exit before a full substrate exists.
-fn log_light(root: &PathBuf, harness: &str, event: &str, verdict: &str) {
-    if let Ok(git_dir) = substrate::find_root(root)
-        .and_then(|r| substrate::find_git_dir(&r))
-    {
+fn log_light(root: &Path, harness: &str, event: &str, verdict: &str) {
+    if let Ok(git_dir) = substrate::find_root(root).and_then(|r| substrate::find_git_dir(&r)) {
         State::at(git_dir).log_event(harness, event, verdict, "");
     }
 }
@@ -271,7 +275,9 @@ fn handle_toolgate(
 /// tools pass the gatekeeper unconditionally.
 fn is_mutating_tool(tool_name: &str) -> bool {
     let t = tool_name.to_ascii_lowercase();
-    ["write", "patch", "edit", "terminal", "shell", "bash", "create", "delete", "move", "exec"]
-        .iter()
-        .any(|kw| t.contains(kw))
+    [
+        "write", "patch", "edit", "terminal", "shell", "bash", "create", "delete", "move", "exec",
+    ]
+    .iter()
+    .any(|kw| t.contains(kw))
 }

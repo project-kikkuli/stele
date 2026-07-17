@@ -1,0 +1,35 @@
+{
+  "PreToolUse": [
+    {
+      "hooks": [
+        {
+          "command": "stele hook devin-cli pre-tool-use",
+          "type": "command"
+        }
+      ],
+      "matcher": ""
+    }
+  ],
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "command": "stele hook devin-cli stop",
+          "type": "command"
+        }
+      ],
+      "matcher": ""
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "command": "stele hook devin-cli prompt",
+          "type": "command"
+        }
+      ],
+      "matcher": ""
+    }
+  ]
+}

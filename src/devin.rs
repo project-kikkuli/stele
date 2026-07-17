@@ -92,7 +92,9 @@ pub fn watch(session_id: &str, max_nudges: u32, poll_secs: u64) -> i32 {
                         return 1;
                     }
                     nudges += 1;
-                    eprintln!("stele devin watch: red — sending findings (nudge {nudges}/{max_nudges})");
+                    eprintln!(
+                        "stele devin watch: red — sending findings (nudge {nudges}/{max_nudges})"
+                    );
                     let reason = engine::render_reason(&v);
                     api_post_message(&key, session_id, &reason);
                 }
@@ -125,7 +127,14 @@ fn verdict_now() -> Option<engine::Verdict> {
 
 fn api_get(key: &str, url: &str) -> Option<Value> {
     let out = Command::new("curl")
-        .args(["-sS", "-m", "30", "-H", &format!("Authorization: Bearer {key}"), url])
+        .args([
+            "-sS",
+            "-m",
+            "30",
+            "-H",
+            &format!("Authorization: Bearer {key}"),
+            url,
+        ])
         .output()
         .ok()?;
     serde_json::from_slice(&out.stdout).ok()

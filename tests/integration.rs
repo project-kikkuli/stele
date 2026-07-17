@@ -40,7 +40,10 @@ fn sh(dir: &Path, cmd: &str) {
 fn fixture() -> (TempDir, PathBuf) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().to_path_buf();
-    sh(&root, "git init -q -b main && git config user.email t@t && git config user.name t");
+    sh(
+        &root,
+        "git init -q -b main && git config user.email t@t && git config user.name t",
+    );
     fs::write(root.join("app.py"), "def add(a, b):\n    return a + b\n").unwrap();
     fs::write(root.join("stele.toml"), RULES_TOML).unwrap();
     sh(&root, "git add -A && git commit -qm init");
@@ -67,7 +70,9 @@ path = "x.md"
 "#,
     )
     .unwrap();
-    assert!(config::load(tmp.path()).unwrap_err().contains("exactly one"));
+    assert!(config::load(tmp.path())
+        .unwrap_err()
+        .contains("exactly one"));
 }
 
 #[test]
@@ -100,7 +105,11 @@ fn artifact_rule(scope: Vec<String>) -> Rule {
         check: None,
         artifact: Some(Artifact {
             path: "requirements.md".into(),
-            sections: vec!["# Requirements".into(), "## Functional".into(), "## Risks".into()],
+            sections: vec![
+                "# Requirements".into(),
+                "## Functional".into(),
+                "## Risks".into(),
+            ],
             nonempty_sections: false,
         }),
     }
@@ -109,7 +118,11 @@ fn artifact_rule(scope: Vec<String>) -> Rule {
 #[test]
 fn artifact_rule_reports_missing_file_then_missing_sections_then_green() {
     let (_tmp, root) = fixture();
-    fs::write(root.join("app.py"), "def add(a, b):\n    return a + b  # changed\n").unwrap();
+    fs::write(
+        root.join("app.py"),
+        "def add(a, b):\n    return a + b  # changed\n",
+    )
+    .unwrap();
     let rule = artifact_rule(vec![]);
 
     let sub = make_substrate(&root);
@@ -138,9 +151,16 @@ fn scope_gates_rule_triggering() {
 
     let py_only = artifact_rule(vec!["**/*.py".into()]);
     let result = rules::evaluate(&py_only, &make_substrate(&root));
-    assert!(!result.triggered, "txt change must not trigger py-scoped rule");
+    assert!(
+        !result.triggered,
+        "txt change must not trigger py-scoped rule"
+    );
 
-    fs::write(root.join("app.py"), "def add(a, b):\n    return a + b  # v2\n").unwrap();
+    fs::write(
+        root.join("app.py"),
+        "def add(a, b):\n    return a + b  # v2\n",
+    )
+    .unwrap();
     let result = rules::evaluate(&py_only, &make_substrate(&root));
     assert!(result.triggered);
 }
@@ -174,7 +194,11 @@ fn command_rule_distinguishes_red_from_unmeasurable() {
     assert!(result.red());
     assert_eq!(result.findings, vec!["✗ nope"]);
 
-    let green = Rule { id: "g".into(), check: Some("true".into()), ..red.clone() };
+    let green = Rule {
+        id: "g".into(),
+        check: Some("true".into()),
+        ..red.clone()
+    };
     assert!(!rules::evaluate(&green, &sub).red());
 }
 
@@ -189,8 +213,14 @@ fn block_slots_cap_per_signature_and_reset_on_new_signature() {
 
     assert!(state.take_block_slot("sig-a", 2));
     assert!(state.take_block_slot("sig-a", 2));
-    assert!(!state.take_block_slot("sig-a", 2), "third block must be denied");
-    assert!(state.take_block_slot("sig-b", 2), "new signature resets the count");
+    assert!(
+        !state.take_block_slot("sig-a", 2),
+        "third block must be denied"
+    );
+    assert!(
+        state.take_block_slot("sig-b", 2),
+        "new signature resets the count"
+    );
 }
 
 #[test]
@@ -249,7 +279,10 @@ fn compile_writes_all_channels_and_is_idempotent() {
     }
 
     let again = stele::compile::run(&root, &rules).unwrap();
-    assert!(again.is_empty(), "second compile must be a no-op, wrote {again:?}");
+    assert!(
+        again.is_empty(),
+        "second compile must be a no-op, wrote {again:?}"
+    );
 }
 
 #[test]
@@ -267,7 +300,10 @@ fn compile_preserves_existing_user_hooks() {
     let doc: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(root.join(".claude/settings.json")).unwrap())
             .unwrap();
-    assert_eq!(doc["permissions"]["allow"][0], "Bash(ls)", "user config preserved");
+    assert_eq!(
+        doc["permissions"]["allow"][0], "Bash(ls)",
+        "user config preserved"
+    );
     let stops = doc["hooks"]["Stop"].as_array().unwrap();
     assert_eq!(stops.len(), 2, "user hook + stele hook");
     assert_eq!(stops[0]["hooks"][0]["command"], "my-own-hook.sh");
@@ -281,7 +317,10 @@ fn compile_refuses_to_clobber_foreign_pre_push() {
     let rules = config::load(&root).unwrap();
     stele::compile::run(&root, &rules).unwrap();
     let body = fs::read_to_string(root.join(".git/hooks/pre-push")).unwrap();
-    assert_eq!(body, "#!/bin/sh\necho mine\n", "foreign hook must be untouched");
+    assert_eq!(
+        body, "#!/bin/sh\necho mine\n",
+        "foreign hook must be untouched"
+    );
 }
 
 #[test]
@@ -293,7 +332,11 @@ fn agents_md_managed_block_updates_in_place() {
     stele::compile::run(&root, &rules).unwrap();
     let body = fs::read_to_string(root.join("AGENTS.md")).unwrap();
     assert!(body.contains("Hand-written intro."));
-    assert_eq!(body.matches("stele:begin").count(), 1, "block must not duplicate");
+    assert_eq!(
+        body.matches("stele:begin").count(),
+        1,
+        "block must not duplicate"
+    );
     assert!(body.contains("requirements-doc"));
 }
 
@@ -314,7 +357,12 @@ fn run_hook(root: &Path, harness: &str, event: &str, payload: &str) -> (String, 
         .spawn()
         .unwrap();
     use std::io::Write;
-    child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().unwrap();
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -325,7 +373,11 @@ fn run_hook(root: &Path, harness: &str, event: &str, payload: &str) -> (String, 
 #[test]
 fn hook_stop_blocks_then_gives_up_then_goes_green() {
     let (_tmp, root) = fixture();
-    fs::write(root.join("app.py"), "def add(a, b):\n    return a + b  # touched\n").unwrap();
+    fs::write(
+        root.join("app.py"),
+        "def add(a, b):\n    return a + b  # touched\n",
+    )
+    .unwrap();
 
     // Block 1 and 2: same signature, default cap 2.
     let (out, code) = run_hook(&root, "claude-code", "stop", "{}");
@@ -342,7 +394,12 @@ fn hook_stop_blocks_then_gives_up_then_goes_green() {
     assert_eq!((out.trim(), code), ("", 0));
 
     // Loop guard: retry payload must always be silent.
-    let (out, _) = run_hook(&root, "claude-code", "stop", r#"{"stop_hook_active": true}"#);
+    let (out, _) = run_hook(
+        &root,
+        "claude-code",
+        "stop",
+        r#"{"stop_hook_active": true}"#,
+    );
     assert_eq!(out.trim(), "");
 
     // Agent complies → green, silent, and cached.
@@ -372,10 +429,16 @@ fn hook_cursor_emits_followup_message() {
     let payload = format!(r#"{{"workspace_roots": ["{}"]}}"#, root.display());
     let (out, _) = run_hook(&root, "cursor", "stop", &payload);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert!(v["followup_message"].as_str().unwrap().contains("requirements.md"));
+    assert!(v["followup_message"]
+        .as_str()
+        .unwrap()
+        .contains("requirements.md"));
 
     // Cursor loop guard.
-    let payload = format!(r#"{{"workspace_roots": ["{}"], "loop_count": 1}}"#, root.display());
+    let payload = format!(
+        r#"{{"workspace_roots": ["{}"], "loop_count": 1}}"#,
+        root.display()
+    );
     let (out, _) = run_hook(&root, "cursor", "stop", &payload);
     assert_eq!(out.trim(), "");
 }
@@ -387,11 +450,14 @@ fn hook_hermes_gatekeeper_allows_remediation_blocks_the_rest() {
     let base = format!(r#""cwd": "{}""#, root.display());
 
     // Mutating tools are gated while red; read-only tools always pass.
-    let blocked = format!(r#"{{{base}, "tool_name": "terminal", "tool_input": {{"command": "touch app.py"}}}}"#);
+    let blocked = format!(
+        r#"{{{base}, "tool_name": "terminal", "tool_input": {{"command": "touch app.py"}}}}"#
+    );
     let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &blocked);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["action"], "block");
-    let readonly = format!(r#"{{{base}, "tool_name": "read_file", "tool_input": {{"path": "app.py"}}}}"#);
+    let readonly =
+        format!(r#"{{{base}, "tool_name": "read_file", "tool_input": {{"path": "app.py"}}}}"#);
     let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &readonly);
     assert_eq!(out.trim(), "{}");
 
@@ -409,11 +475,19 @@ fn check_exit_codes_distinguish_green_red_unmeasurable() {
     let (_tmp, root) = fixture();
 
     // Nothing changed: green (no rules trigger).
-    let ok = Command::new(stele_bin()).arg("check").current_dir(&root).output().unwrap();
+    let ok = Command::new(stele_bin())
+        .arg("check")
+        .current_dir(&root)
+        .output()
+        .unwrap();
     assert_eq!(ok.status.code(), Some(0));
 
     fs::write(root.join("app.py"), "v2\n").unwrap();
-    let red = Command::new(stele_bin()).arg("check").current_dir(&root).output().unwrap();
+    let red = Command::new(stele_bin())
+        .arg("check")
+        .current_dir(&root)
+        .output()
+        .unwrap();
     assert_eq!(red.status.code(), Some(1));
 
     // A check that cannot run is exit 3, not green.
@@ -426,8 +500,16 @@ check = "/nonexistent/checker"
 "#,
     )
     .unwrap();
-    let unmeasurable = Command::new(stele_bin()).arg("check").current_dir(&root).output().unwrap();
-    assert_eq!(unmeasurable.status.code(), Some(1), "bash exits 127 → findings");
+    let unmeasurable = Command::new(stele_bin())
+        .arg("check")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        unmeasurable.status.code(),
+        Some(1),
+        "bash exits 127 → findings"
+    );
 }
 
 // ----------------------------------------------------- merge attribution
@@ -445,7 +527,10 @@ fn merge_in_progress_does_not_attribute_mainline_files() {
     sh(&root, "git add -A && git commit -qm mainline-work");
     // Back on feature, merge main WITHOUT committing: MERGE_HEAD exists and
     // the index holds the whole merged tree, including mainline.py.
-    sh(&root, "git checkout -q feature && git merge --no-commit --no-ff main");
+    sh(
+        &root,
+        "git checkout -q feature && git merge --no-commit --no-ff main",
+    );
 
     let sub = make_substrate(&root);
     assert!(
@@ -468,7 +553,11 @@ fn snapshot_signature_tracks_content_exactly() {
     let sig_a2 = make_substrate(&root).signature;
     assert_eq!(sig_a, sig_a2, "same content, same signature");
     fs::write(root.join("app.py"), "v3\n").unwrap();
-    assert_ne!(sig_a, make_substrate(&root).signature, "moved content, moved signature");
+    assert_ne!(
+        sig_a,
+        make_substrate(&root).signature,
+        "moved content, moved signature"
+    );
 }
 
 // -------------------------------------------------------------------- ack
@@ -491,7 +580,11 @@ fn acked_rule_stops_gating_everywhere() {
     sh(&root, "git add -A && git commit -qm wip");
 
     // Red without ack.
-    let out = Command::new(stele_bin()).arg("check").current_dir(&root).output().unwrap();
+    let out = Command::new(stele_bin())
+        .arg("check")
+        .current_dir(&root)
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
 
     // `stele ack` records the trailer...
@@ -500,10 +593,18 @@ fn acked_rule_stops_gating_everywhere() {
         .current_dir(&root)
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // ...check passes with an acknowledgement note...
-    let out = Command::new(stele_bin()).arg("check").current_dir(&root).output().unwrap();
+    let out = Command::new(stele_bin())
+        .arg("check")
+        .current_dir(&root)
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&out.stdout).contains("acknowledged"));
 
@@ -552,7 +653,11 @@ fn nudge_never_blocks_but_speaks_in_prompt_once() {
     fs::write(root.join("app.py"), "v2\n").unwrap();
 
     // check: exit 0 with advisory output.
-    let out = Command::new(stele_bin()).arg("check").current_dir(&root).output().unwrap();
+    let out = Command::new(stele_bin())
+        .arg("check")
+        .current_dir(&root)
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&out.stdout).contains("advisory"));
 
@@ -562,7 +667,10 @@ fn nudge_never_blocks_but_speaks_in_prompt_once() {
 
     // prompt: speaks once per signature, then stays quiet.
     let (out, _) = run_hook(&root, "claude-code", "prompt", "{}");
-    assert!(out.contains("requirements.md"), "first prompt injection carries the nudge");
+    assert!(
+        out.contains("requirements.md"),
+        "first prompt injection carries the nudge"
+    );
     let (out, _) = run_hook(&root, "claude-code", "prompt", "{}");
     assert_eq!(out.trim(), "", "second prompt injection is gated");
 }
@@ -584,7 +692,8 @@ fn no_verify_denied_while_red_allowed_when_green() {
     let (_tmp, root) = fixture();
     fs::write(root.join("app.py"), "v2\n").unwrap();
 
-    let payload = r#"{"tool_name": "Bash", "tool_input": {"command": "git commit --no-verify -m wip"}}"#;
+    let payload =
+        r#"{"tool_name": "Bash", "tool_input": {"command": "git commit --no-verify -m wip"}}"#;
     let (out, _) = run_hook(&root, "claude-code", "pre-tool-use", payload);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
@@ -618,7 +727,10 @@ fn exact_heading_match_rejects_lookalikes() {
     .unwrap();
     let rule = artifact_rule(vec![]);
     let result = rules::evaluate(&rule, &make_substrate(&root));
-    assert!(result.red(), "`## Functionality` must not satisfy `## Functional`");
+    assert!(
+        result.red(),
+        "`## Functionality` must not satisfy `## Functional`"
+    );
 }
 
 #[test]
@@ -634,7 +746,11 @@ fn nonempty_sections_require_content() {
     rule.artifact.as_mut().unwrap().nonempty_sections = true;
     let result = rules::evaluate(&rule, &make_substrate(&root));
     assert!(result.red());
-    assert!(result.findings.iter().any(|f| f.contains("empty")), "{:?}", result.findings);
+    assert!(
+        result.findings.iter().any(|f| f.contains("empty")),
+        "{:?}",
+        result.findings
+    );
 }
 
 // -------------------------------------------------- telemetry + doctor
@@ -643,9 +759,17 @@ fn nonempty_sections_require_content() {
 fn loop_guard_exits_are_logged() {
     let (_tmp, root) = fixture();
     fs::write(root.join("app.py"), "v2\n").unwrap();
-    run_hook(&root, "claude-code", "stop", r#"{"stop_hook_active": true}"#);
+    run_hook(
+        &root,
+        "claude-code",
+        "stop",
+        r#"{"stop_hook_active": true}"#,
+    );
     let events = fs::read_to_string(root.join(".git/stele/events.jsonl")).unwrap_or_default();
-    assert!(events.contains("loop-guard"), "guard exits must appear in telemetry: {events}");
+    assert!(
+        events.contains("loop-guard"),
+        "guard exits must appear in telemetry: {events}"
+    );
 }
 
 #[test]
@@ -653,7 +777,10 @@ fn iso_timestamps() {
     let ts = stele::engine::iso_now();
     // e.g. 2026-07-17T21:04:05Z
     assert_eq!(ts.len(), 20, "{ts}");
-    assert!(ts.ends_with('Z') && ts.contains('T') && ts.starts_with("20"), "{ts}");
+    assert!(
+        ts.ends_with('Z') && ts.contains('T') && ts.starts_with("20"),
+        "{ts}"
+    );
 }
 
 #[test]
@@ -661,7 +788,11 @@ fn doctor_reports_wiring_state() {
     let (_tmp, root) = fixture();
     let rules = config::load(&root).unwrap();
     stele::compile::run(&root, &rules).unwrap();
-    let out = Command::new(stele_bin()).arg("doctor").current_dir(&root).output().unwrap();
+    let out = Command::new(stele_bin())
+        .arg("doctor")
+        .current_dir(&root)
+        .output()
+        .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("stele doctor"));
     assert!(text.contains(".claude/settings.json wired"), "{text}");
@@ -674,7 +805,10 @@ fn compile_wires_pre_tool_use_guard() {
     let rules = config::load(&root).unwrap();
     stele::compile::run(&root, &rules).unwrap();
     let body = fs::read_to_string(root.join(".claude/settings.json")).unwrap();
-    assert!(body.contains("stele hook claude-code pre-tool-use"), "{body}");
+    assert!(
+        body.contains("stele hook claude-code pre-tool-use"),
+        "{body}"
+    );
 }
 
 #[test]
@@ -686,18 +820,25 @@ fn hermes_gatekeeper_blocks_the_call_that_would_create_the_red() {
     let base = format!(r#""cwd": "{}""#, root.display());
 
     // Mutating tool on a clean tree: blocked.
-    let write = format!(r#"{{{base}, "tool_name": "write_file", "tool_input": {{"path": "app.py"}}}}"#);
+    let write =
+        format!(r#"{{{base}, "tool_name": "write_file", "tool_input": {{"path": "app.py"}}}}"#);
     let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &write);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v["action"], "block", "first mutating call must be gated: {out}");
+    assert_eq!(
+        v["action"], "block",
+        "first mutating call must be gated: {out}"
+    );
 
     // Read-only tool: always allowed.
-    let read = format!(r#"{{{base}, "tool_name": "read_file", "tool_input": {{"path": "app.py"}}}}"#);
+    let read =
+        format!(r#"{{{base}, "tool_name": "read_file", "tool_input": {{"path": "app.py"}}}}"#);
     let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &read);
     assert_eq!(out.trim(), "{}", "read-only tools pass: {out}");
 
     // Remediation: allowed.
-    let fix = format!(r#"{{{base}, "tool_name": "write_file", "tool_input": {{"path": "requirements.md"}}}}"#);
+    let fix = format!(
+        r#"{{{base}, "tool_name": "write_file", "tool_input": {{"path": "requirements.md"}}}}"#
+    );
     let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &fix);
     assert_eq!(out.trim(), "{}", "artifact write passes: {out}");
 
@@ -709,4 +850,30 @@ fn hermes_gatekeeper_blocks_the_call_that_would_create_the_red() {
     .unwrap();
     let (out, _) = run_hook(&root, "hermes", "pre_tool_call", &write);
     assert_eq!(out.trim(), "{}", "green tree passes: {out}");
+}
+
+// ------------------------------------------------------------ ci generation
+
+#[test]
+fn generated_ci_self_hosts_in_the_stele_repo_and_https_ifies_ssh_origins() {
+    // A repo that IS the stele source builds from its own checkout.
+    let (_tmp, root) = fixture();
+    fs::write(root.join("Cargo.toml"), "[package]\nname = \"stele\"\n").unwrap();
+    let rules = config::load(&root).unwrap();
+    stele::compile::run(&root, &rules).unwrap();
+    let wf = fs::read_to_string(root.join(".github/workflows/stele.yml")).unwrap();
+    assert!(wf.contains("cargo install --path . --locked"), "{wf}");
+
+    // An ordinary repo with an ssh origin gets an https install source —
+    // runners can't fetch git@ URLs.
+    let (_tmp2, root2) = fixture();
+    sh(
+        &root2,
+        "git remote add origin git@github.com:acme/widgets.git",
+    );
+    let rules2 = config::load(&root2).unwrap();
+    stele::compile::run(&root2, &rules2).unwrap();
+    let wf2 = fs::read_to_string(root2.join(".github/workflows/stele.yml")).unwrap();
+    assert!(wf2.contains("https://github.com/acme/widgets.git"), "{wf2}");
+    assert!(!wf2.contains("git@github.com"), "{wf2}");
 }

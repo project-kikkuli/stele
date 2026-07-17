@@ -38,7 +38,11 @@ fn in_scope(rule: &Rule, substrate: &Substrate) -> bool {
         .filter(|p| !p.starts_with('!'))
         .map(String::as_str)
         .collect();
-    let excludes: Vec<&str> = rule.scope.iter().filter_map(|p| p.strip_prefix('!')).collect();
+    let excludes: Vec<&str> = rule
+        .scope
+        .iter()
+        .filter_map(|p| p.strip_prefix('!'))
+        .collect();
     substrate.changed.iter().any(|path| {
         !excludes.iter().any(|pat| glob_match(pat, path))
             && includes.iter().any(|pat| glob_match(pat, path))

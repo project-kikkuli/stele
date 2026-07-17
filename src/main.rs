@@ -105,12 +105,19 @@ fn main() -> ExitCode {
                 eprintln!("could not write {}", config::CONFIG_NAME);
                 return ExitCode::from(2);
             }
-            println!("wrote {} — edit it, then run `stele compile`", config::CONFIG_NAME);
+            println!(
+                "wrote {} — edit it, then run `stele compile`",
+                config::CONFIG_NAME
+            );
             ExitCode::SUCCESS
         }
         Cmd::Check { quiet_green } => run_check(quiet_green),
         Cmd::Hook { harness, event } => ExitCode::from(hook::run(&harness, &event) as u8),
-        Cmd::Wrap { prompt, max_loops, cmd } => ExitCode::from(wrap::run(max_loops, &prompt, &cmd) as u8),
+        Cmd::Wrap {
+            prompt,
+            max_loops,
+            cmd,
+        } => ExitCode::from(wrap::run(max_loops, &prompt, &cmd) as u8),
         Cmd::Compile => run_compile(),
         Cmd::Install { harness } => run_install(&harness),
         Cmd::Ack { rule_id, message } => run_ack(&rule_id, &message),
@@ -118,9 +125,11 @@ fn main() -> ExitCode {
         Cmd::Conformance { harnesses } => ExitCode::from(conformance::run(&harnesses) as u8),
         Cmd::Devin { cmd } => match cmd {
             DevinCmd::Setup => ExitCode::from(devin::setup() as u8),
-            DevinCmd::Watch { session_id, max_nudges, poll_secs } => {
-                ExitCode::from(devin::watch(&session_id, max_nudges, poll_secs) as u8)
-            }
+            DevinCmd::Watch {
+                session_id,
+                max_nudges,
+                poll_secs,
+            } => ExitCode::from(devin::watch(&session_id, max_nudges, poll_secs) as u8),
         },
     }
 }
@@ -209,7 +218,10 @@ fn run_check(quiet_green: bool) -> ExitCode {
             }
         }
         for r in verdict.acknowledged() {
-            println!("stele: `{}` failing but acknowledged (Stele-Ack trailer)", r.rule.id);
+            println!(
+                "stele: `{}` failing but acknowledged (Stele-Ack trailer)",
+                r.rule.id
+            );
         }
         if !quiet_green {
             let triggered = verdict.results.iter().filter(|r| r.triggered).count();
@@ -258,7 +270,9 @@ fn run_compile() -> ExitCode {
             }
             println!("\nchannels: claude-code ✓  codex ✓  devin-cli ✓  cursor-ide ✓  git pre-push ✓  ci ✓  AGENTS.md ✓");
             println!("hermes: run `stele install hermes` once per user");
-            println!("cursor headless: use `stele wrap --prompt '<task>' -- cursor-agent -p --force`");
+            println!(
+                "cursor headless: use `stele wrap --prompt '<task>' -- cursor-agent -p --force`"
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {

@@ -119,7 +119,9 @@ fn check_json_wiring(r: &mut Report, root: &Path, rel: &str, harness: &str) {
                 r.warn("cursor: hooks fire in the IDE only — headless runs need `stele wrap`");
             }
         }
-        Ok(_) => r.bad(&format!("{rel} exists but has no stele hook — run `stele compile`")),
+        Ok(_) => r.bad(&format!(
+            "{rel} exists but has no stele hook — run `stele compile`"
+        )),
         Err(_) => r.bad(&format!("{rel} missing — run `stele compile`")),
     }
 }

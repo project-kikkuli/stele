@@ -22,16 +22,14 @@ pub fn parse(messages: &str) -> HashSet<String> {
     messages
         .lines()
         .filter_map(|line| line.trim().strip_prefix(TRAILER))
-        .map(|rest| rest.trim().split_whitespace().next().unwrap_or("").to_string())
+        .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
         .filter(|id| !id.is_empty())
         .collect()
 }
 
 /// Record an acknowledgement as an empty commit with the trailer.
 pub fn create(sub: &Substrate, rule_id: &str, reason: &str) -> Result<(), String> {
-    let message = format!(
-        "stele: acknowledge `{rule_id}`\n\n{reason}\n\n{TRAILER} {rule_id}\n"
-    );
+    let message = format!("stele: acknowledge `{rule_id}`\n\n{reason}\n\n{TRAILER} {rule_id}\n");
     let out = Command::new("git")
         .arg("-C")
         .arg(&sub.root)
