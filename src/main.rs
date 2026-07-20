@@ -31,6 +31,11 @@ enum Cmd {
         /// Print nothing when green (for git hooks).
         #[arg(long)]
         quiet_green: bool,
+        /// Rule layers to evaluate. The generated repo pre-push uses `repo` so
+        /// personal/system rules gate through their own global hooks, not this
+        /// repository's wiring.
+        #[arg(long, value_enum, default_value_t = HookScope::All)]
+        scope: HookScope,
     },
     /// Harness hook entrypoint (payload on stdin). Always exits 0: fail-open.
     Hook {
@@ -203,7 +208,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Cmd::Init { global, system } => run_init(global, system),
-        Cmd::Check { quiet_green } => run_check(quiet_green),
+        Cmd::Check { quiet_green, scope } => run_check(quiet_green, scope.into()),
         Cmd::Hook {
             harness,
             event,
@@ -330,7 +335,7 @@ fn run_ack(rule_id: &str, message: &str) -> ExitCode {
     }
 }
 
-fn run_check(quiet_green: bool) -> ExitCode {
+fn run_check(quiet_green: bool, scope: config::LoadScope) -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -345,7 +350,7 @@ fn run_check(quiet_green: bool) -> ExitCode {
             return ExitCode::from(3);
         }
     };
-    let rules = match config::load(&sub.root) {
+    let rules = match config::load_scope(&sub.root, scope) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("stele: {e}");

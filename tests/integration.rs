@@ -350,6 +350,45 @@ fn compile_writes_all_channels_and_is_idempotent() {
     let codex = fs::read_to_string(root.join(".codex/hooks.json")).unwrap();
     assert!(codex.contains("session-start --scope repo"), "{codex}");
     assert!(codex.contains("pre-tool-use --scope repo"), "{codex}");
+    // The repo pre-push evaluates only repository rules; personal/system rules
+    // gate through their own global hooks, not this repository's wiring.
+    let pre_push = fs::read_to_string(root.join(".git/hooks/pre-push")).unwrap();
+    assert!(
+        pre_push.contains("stele check --quiet-green --scope repo"),
+        "{pre_push}"
+    );
+}
+
+#[test]
+fn check_scope_repo_ignores_personal_rules_that_full_check_reports() {
+    let (_tmp, root) = fixture(); // repo stele.toml has a passing artifact rule
+                                  // A failing personal (user-layer) rule that would gate a full `stele check`.
+                                  // Kept outside the repo so it doesn't dirty the tree and trip a repo rule.
+    let cfg = TempDir::new().unwrap();
+    let user = cfg.path().join("user-stele.toml");
+    fs::write(
+        &user,
+        "[[rule]]\nid = \"personal-fail\"\nseverity = \"block\"\ntrigger = \"always\"\ncheck = \"exit 1\"\n",
+    )
+    .unwrap();
+    let missing_system = cfg.path().join("missing-system.toml");
+    let run = |scope: &str| {
+        Command::new(stele_bin())
+            .args(["check", "--scope", scope])
+            .current_dir(&root)
+            .env(config::USER_CONFIG_ENV, &user)
+            .env(config::SYSTEM_CONFIG_ENV, &missing_system)
+            .env_remove("CLAUDE_PROJECT_DIR")
+            .output()
+            .unwrap()
+    };
+    // Full check sees the personal rule and fails; repo-scoped ignores it.
+    assert_eq!(run("all").status.code(), Some(1));
+    assert_eq!(
+        run("repo").status.code(),
+        Some(0),
+        "repo scope must not evaluate the personal layer"
+    );
 }
 
 #[test]

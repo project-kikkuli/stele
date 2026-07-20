@@ -227,9 +227,10 @@ fn write_git_hook(root: &Path, written: &mut Vec<String>) -> Result<(), String> 
     }
     let body = format!(
         "#!/usr/bin/env bash\n{HOOK_MARKER}\n\
-         # Fast local wall: same check CI runs. Bypassable with --no-verify;\n\
-         # CI is not.\n\
-         exec stele check --quiet-green\n"
+         # Fast local wall for THIS repository's rules. Personal/system rules\n\
+         # gate through their own global hooks, so they are not re-run here.\n\
+         # Bypassable with --no-verify; CI is not.\n\
+         exec stele check --quiet-green --scope repo\n"
     );
     write_file(&hook, &body, written)?;
     make_executable(&hook);

@@ -16,6 +16,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "block"` to enforce (that's what `stele run` is for).
 
 ### Changed
+- The generated repo pre-push hook now runs `stele check --scope repo`, so it
+  gates only the repository's own rules. Personal/system rules gate through
+  their own global hooks — a personal `block` rule no longer blocks pushes in
+  every repository. `stele check` gains a `--scope` flag (default: all layers).
 - Hermes shim is now a bare `exec stele hook` — stele reads `cwd` from the
   payload and self-scopes, dropping the shim's undeclared `python3` dependency.
 - Hermes fail-open paths now emit an explicit `{}` allow, so the gate never sees
