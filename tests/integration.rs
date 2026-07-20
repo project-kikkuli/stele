@@ -549,7 +549,7 @@ fn global_hook_install_accepts_system_rules_without_personal_config() {
     )
     .unwrap();
     let out = Command::new(stele_bin())
-        .args(["install", "global"])
+        .args(["install", "global", "--yes"])
         .current_dir(home.path())
         .env("HOME", home.path())
         .env(config::USER_CONFIG_ENV, &missing_user)
@@ -570,7 +570,7 @@ fn global_install_bootstraps_personal_rules_and_uninstall_can_purge_them() {
     let user = home.path().join("config/stele/stele.toml");
     let system = home.path().join("missing-system.toml");
     let install = Command::new(stele_bin())
-        .args(["install", "global"])
+        .args(["install", "global", "--yes"])
         .current_dir(home.path())
         .env("HOME", home.path())
         .env(config::USER_CONFIG_ENV, &user)
@@ -605,6 +605,54 @@ fn global_install_bootstraps_personal_rules_and_uninstall_can_purge_them() {
 }
 
 #[test]
+fn install_global_refuses_inside_an_agent_session_unless_forced() {
+    let home = TempDir::new().unwrap();
+    let user = home.path().join("config/stele/stele.toml");
+    let system = home.path().join("missing-system.toml");
+
+    // Inside an agent session (CLAUDECODE set), refuse: wiring global hooks
+    // would gate this very session on its next tool call.
+    let refused = Command::new(stele_bin())
+        .args(["install", "global"])
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env("CLAUDECODE", "1")
+        .env(config::USER_CONFIG_ENV, &user)
+        .env(config::SYSTEM_CONFIG_ENV, &system)
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("refusing"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(!user.exists(), "must not write config when refusing");
+
+    // --yes overrides and wires it, and the blast-radius note is always shown.
+    let forced = Command::new(stele_bin())
+        .args(["install", "global", "--yes"])
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env("CLAUDECODE", "1")
+        .env(config::USER_CONFIG_ENV, &user)
+        .env(config::SYSTEM_CONFIG_ENV, &system)
+        .output()
+        .unwrap();
+    assert!(
+        forced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert!(user.exists());
+    assert!(
+        String::from_utf8_lossy(&forced.stdout).contains("every git repo"),
+        "{}",
+        String::from_utf8_lossy(&forced.stdout)
+    );
+}
+
+#[test]
 fn global_install_rolls_back_bootstrap_when_user_hooks_are_invalid() {
     let home = TempDir::new().unwrap();
     fs::create_dir_all(home.path().join(".codex")).unwrap();
@@ -613,7 +661,7 @@ fn global_install_rolls_back_bootstrap_when_user_hooks_are_invalid() {
     let user = home.path().join("config/stele/stele.toml");
     let system = home.path().join("missing-system.toml");
     let install = Command::new(stele_bin())
-        .args(["install", "global"])
+        .args(["install", "global", "--yes"])
         .current_dir(home.path())
         .env("HOME", home.path())
         .env(config::USER_CONFIG_ENV, &user)
@@ -876,7 +924,7 @@ check = "/nonexistent/checker"
 }
 
 #[test]
-fn personal_worktree_rule_blocks_primary_checkout_before_edit_and_passes_linked_worktree() {
+fn personal_worktree_starter_is_an_advisory_nudge_that_passes_in_a_worktree() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("repo");
     fs::create_dir_all(&root).unwrap();
@@ -898,12 +946,102 @@ fn personal_worktree_rule_blocks_primary_checkout_before_edit_and_passes_linked_
         "{}",
         String::from_utf8_lossy(&init.stderr)
     );
+    // The shipped default is a nudge — installing it can never freeze an agent.
     let personal = fs::read_to_string(&user_config).unwrap();
-    assert!(personal.contains("trigger = \"always\""), "{personal}");
+    assert!(personal.contains("severity = \"nudge\""), "{personal}");
     assert!(personal.contains("personal-worktree-only"), "{personal}");
 
-    // A clean primary checkout is red: global rules do not need a repo-local
-    // stele.toml and `always` rules do not need a dirty change-set.
+    // A clean primary checkout surfaces the advisory but stays green (exit 0):
+    // a nudge informs, it never fails.
+    let check = global_stele_command(&root, &user_config, &system_config)
+        .arg("check")
+        .output()
+        .unwrap();
+    assert_eq!(
+        check.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&check.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&check.stdout).contains("primary checkout"),
+        "{}",
+        String::from_utf8_lossy(&check.stdout)
+    );
+
+    // SessionStart injects the reminder as context...
+    let session = format!(r#"{{"cwd":"{}"}}"#, root.display());
+    let (out, code) = run_global_hook(&root, &user_config, "codex", "session-start", &session);
+    assert_eq!(code, 0);
+    assert!(out.contains("personal-worktree-only"), "{out}");
+
+    // ...but the first mutating tool is NOT gated: a nudge never blocks.
+    let mutation = format!(
+        r#"{{"cwd":"{}","tool_name":"apply_patch","tool_input":{{"patch":"x"}}}}"#,
+        root.display()
+    );
+    let (out, _) = run_global_hook(&root, &user_config, "codex", "pre-tool-use", &mutation);
+    assert_eq!(out.trim(), "", "nudge must not gate tool calls: {out}");
+
+    // The exact same personal config goes green with no advisory in a worktree.
+    let linked = tmp.path().join("agent-worktree");
+    let status = Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "agent-work"])
+        .arg(&linked)
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let check = global_stele_command(&linked, &user_config, &system_config)
+        .arg("check")
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+// A user who wants the worktree invariant *enforced* flips severity to block.
+// This preserves coverage of the preflight gate that `stele run` relies on.
+const BLOCK_WORKTREE_RULE: &str = r###"
+[[rule]]
+id = "worktree-only"
+description = "agents always work in linked git worktrees"
+severity = "block"
+trigger = "always"
+acknowledge = false
+message = "Launch with `stele run <agent>`."
+check = '''
+git_dir=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) || exit 1
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 1
+[ "$git_dir" != "$common_dir" ] || {
+  echo '✗ agent session is running in the primary checkout, not a linked worktree'
+  exit 1
+}
+'''
+"###;
+
+#[test]
+fn block_severity_worktree_rule_gates_tools_ack_and_wrap_preflight() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    sh(
+        &root,
+        "git init -q -b main && git config user.email t@t && git config user.name t",
+    );
+    fs::write(root.join("app.py"), "x = 1\n").unwrap();
+    sh(&root, "git add -A && git commit -qm init");
+
+    let user_config = tmp.path().join("config/stele/stele.toml");
+    fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+    fs::write(&user_config, BLOCK_WORKTREE_RULE).unwrap();
+    let system_config = tmp.path().join("missing-system.toml");
+
+    // Primary checkout is red (exit 1) with the finding.
     let check = global_stele_command(&root, &user_config, &system_config)
         .arg("check")
         .output()
@@ -915,12 +1053,7 @@ fn personal_worktree_rule_blocks_primary_checkout_before_edit_and_passes_linked_
         String::from_utf8_lossy(&check.stdout)
     );
 
-    // SessionStart warns before work, and the first mutating tool is denied.
-    let session = format!(r#"{{"cwd":"{}"}}"#, root.display());
-    let (out, code) = run_global_hook(&root, &user_config, "codex", "session-start", &session);
-    assert_eq!(code, 0);
-    assert!(out.contains("personal-worktree-only"), "{out}");
-
+    // The first mutating tool is denied; read-only exploration passes.
     let mutation = format!(
         r#"{{"cwd":"{}","tool_name":"apply_patch","tool_input":{{"patch":"x"}}}}"#,
         root.display()
@@ -928,7 +1061,6 @@ fn personal_worktree_rule_blocks_primary_checkout_before_edit_and_passes_linked_
     let (out, _) = run_global_hook(&root, &user_config, "codex", "pre-tool-use", &mutation);
     let denial: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(denial["hookSpecificOutput"]["permissionDecision"], "deny");
-
     let read = format!(
         r#"{{"cwd":"{}","tool_name":"Read","tool_input":{{"path":"app.py"}}}}"#,
         root.display()
@@ -936,15 +1068,15 @@ fn personal_worktree_rule_blocks_primary_checkout_before_edit_and_passes_linked_
     let (out, _) = run_global_hook(&root, &user_config, "codex", "pre-tool-use", &read);
     assert_eq!(out.trim(), "", "read-only exploration remains available");
 
-    // The starter marks this personal invariant as non-acknowledgeable.
+    // Non-acknowledgeable.
     let ack = global_stele_command(&root, &user_config, &system_config)
-        .args(["ack", "personal-worktree-only", "-m", "skip it"])
+        .args(["ack", "worktree-only", "-m", "skip it"])
         .output()
         .unwrap();
     assert_eq!(ack.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&ack.stderr).contains("does not allow"));
 
-    // Hook-less harnesses are checked before the wrapped agent process starts.
+    // Hook-less harnesses are preflight-checked before the agent process starts.
     let wrapped = global_stele_command(&root, &user_config, &system_config)
         .args([
             "wrap",
@@ -960,7 +1092,7 @@ fn personal_worktree_rule_blocks_primary_checkout_before_edit_and_passes_linked_
     assert!(stderr.contains("session preflight failed"), "{stderr}");
     assert!(!stderr.contains("failed to run agent"), "{stderr}");
 
-    // The exact same personal config goes green in a linked worktree.
+    // The exact same config goes green in a linked worktree.
     let linked = tmp.path().join("agent-worktree");
     let status = Command::new("git")
         .args(["worktree", "add", "-q", "-b", "agent-work"])

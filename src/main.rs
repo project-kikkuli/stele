@@ -75,6 +75,10 @@ enum Cmd {
     Install {
         /// `global` wires every detected user harness. `hermes` is a legacy alias.
         harness: String,
+        /// Wire even from inside a running agent session (which would otherwise
+        /// be gated the instant the hooks land). Bypasses the safety refusal.
+        #[arg(long)]
+        yes: bool,
     },
     /// Remove Stele-owned user hook wiring without touching anyone else's hooks.
     Uninstall {
@@ -152,11 +156,16 @@ sections = ["# Requirements", "## Functional", "## Risks"]
 
 const GLOBAL_STARTER: &str = r###"# Personal Stele rules — evaluated in every git repository on this machine.
 # Run `stele install global` once to wire supported agent harnesses.
+#
+# This ships as a `nudge`: it reminds you when an agent session is running in a
+# primary checkout, but never blocks. Change `severity` to `block` if you want
+# it enforced — then agents must be launched with `stele run <agent>` (a block
+# here gates tool calls and cannot be satisfied mid-session).
 
 [[rule]]
 id = "personal-worktree-only"
 description = "agents always work in linked git worktrees"
-severity = "block"
+severity = "nudge"
 trigger = "always"
 acknowledge = false
 message = "Launch with `stele run <agent> [prompt]`, or create a linked worktree manually and relaunch there."
@@ -171,11 +180,12 @@ common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) 
 "###;
 
 const SYSTEM_STARTER: &str = r###"# Machine-wide Stele rules — provision this file on developer machines and CI runners.
+# Ships as a `nudge` (reminds, never blocks); change `severity` to `block` to enforce.
 
 [[rule]]
 id = "system-worktree-only"
 description = "agents always work in linked git worktrees"
-severity = "block"
+severity = "nudge"
 trigger = "always"
 acknowledge = false
 message = "Launch with `stele run <agent> [prompt]`, or create a linked worktree manually and relaunch there."
@@ -216,7 +226,7 @@ fn main() -> ExitCode {
             cmd,
         } => ExitCode::from(wrap::run(max_loops, &prompt, &cmd) as u8),
         Cmd::Compile => run_compile(),
-        Cmd::Install { harness } => run_install(&harness),
+        Cmd::Install { harness, yes } => run_install(&harness, yes),
         Cmd::Uninstall { harness, purge } => run_uninstall(&harness, purge),
         Cmd::Ack { rule_id, message } => run_ack(&rule_id, &message),
         Cmd::Doctor => ExitCode::from(doctor::run() as u8),
@@ -428,8 +438,43 @@ fn run_compile() -> ExitCode {
     }
 }
 
-fn run_install(harness: &str) -> ExitCode {
+/// Best-effort detection that we're running inside an agent session. Global
+/// hooks take effect on the next tool call, so installing from within an agent
+/// gates that very session — the trap this refusal exists to catch.
+fn detect_agent_session() -> Option<&'static str> {
+    let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    if set("CLAUDECODE") || set("CLAUDE_CODE_ENTRYPOINT") {
+        Some("Claude Code")
+    } else if set("CURSOR_AGENT") || set("CURSOR_TRACE_ID") {
+        Some("Cursor")
+    } else if set("CODEX_SANDBOX") {
+        Some("Codex")
+    } else {
+        None
+    }
+}
+
+fn run_install(harness: &str, yes: bool) -> ExitCode {
     if harness == "global" {
+        // Global hooks are machine-wide and take effect immediately, in every
+        // git repo, for agent sessions already running. Installing from inside
+        // an agent freezes that session (and any others) with no in-session
+        // remediation. Refuse unless the operator explicitly opts in.
+        if !yes {
+            if let Some(agent) = detect_agent_session() {
+                eprintln!(
+                    "stele install global: refusing — you appear to be inside a {agent} session.\n\
+                     \n\
+                     Global hooks activate immediately in EVERY git repository on this machine,\n\
+                     including agent sessions already running (this one, and any others). A running\n\
+                     agent can be gated mid-task with no way to remediate from inside the session.\n\
+                     \n\
+                     Run this from a plain shell instead, then restart any active agents. To wire it\n\
+                     anyway, re-run with --yes."
+                );
+                return ExitCode::from(3);
+            }
+        }
         let user_config = match config::user_config_path() {
             Ok(path) => path,
             Err(e) => {
@@ -480,6 +525,10 @@ fn run_install(harness: &str) -> ExitCode {
                     println!("hermes: not detected; rerun this command after installing it");
                 }
                 println!("headless agents: `stele run <agent> [prompt]`");
+                println!(
+                    "note: active in every git repo on this machine, including agent sessions\n\
+                     already running — restart any active agents so they pick this up cleanly."
+                );
                 ExitCode::SUCCESS
             }
             Err(e) => {

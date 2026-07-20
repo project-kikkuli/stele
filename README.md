@@ -69,13 +69,21 @@ when `~/.hermes/config.yaml` exists. Existing settings and third-party hooks
 are preserved. Rerunning it is a no-op; installing Hermes later only requires
 rerunning the same command.
 
-The personal starter requires agent sessions to run inside a linked git
-worktree. `stele run` creates a branch and worktree under
-`~/.local/state/stele/worktrees`, launches the requested agent there, and
-reuses the current checkout when it is already a linked worktree. It also
-selects Cursor headless's synthesized stop-loop automatically. The low-level
-`stele wrap` command remains available for custom resumable CLIs, but is not
-part of the normal workflow.
+Global hooks take effect immediately in **every** git repository on this
+machine, including agent sessions already running. So `install global` refuses
+when it detects it's being run from inside an agent session (pass `--yes` to
+override), and always prints that blast radius — restart any active agents
+afterward so they pick up the change cleanly.
+
+The personal starter *suggests* running agent sessions inside a linked git
+worktree, shipping as a `nudge`: it reminds when a session runs in a primary
+checkout but never blocks. Change its `severity` to `block` to enforce it — then
+agents must be launched with `stele run`, which creates a branch and worktree
+under `~/.local/state/stele/worktrees`, launches the requested agent there, and
+reuses the current checkout when it is already a linked worktree. `stele run`
+also selects Cursor headless's synthesized stop-loop automatically. The
+low-level `stele wrap` command remains available for custom resumable CLIs, but
+is not part of the normal workflow.
 
 To edit before enabling, `stele init --global` still writes only the personal
 config. To turn dogfooding off without touching repositories:

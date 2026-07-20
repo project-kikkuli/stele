@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Safety
+- `stele install global` now refuses when run from inside an agent session
+  (`CLAUDECODE`/`CURSOR_*`/`CODEX_*`), since global hooks activate immediately
+  and would gate that very session; pass `--yes` to override. It also always
+  prints the blast radius (every repo on the machine, including running agents).
+- The shipped personal/system worktree starter is now a `nudge`, not a `block`:
+  installing it reminds but can never freeze a running agent. Set `severity =
+  "block"` to enforce (that's what `stele run` is for).
+
 ### Changed
 - Hermes shim is now a bare `exec stele hook` — stele reads `cwd` from the
   payload and self-scopes, dropping the shim's undeclared `python3` dependency.
