@@ -1536,6 +1536,7 @@ fn doctor_reports_wiring_state() {
     let out = stele_command(&root).arg("doctor").output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("stele doctor"));
+    assert!(text.contains("bash: "), "{text}"); // the runtime every check fires through
     assert!(text.contains(".claude/settings.json wired"), "{text}");
     assert!(text.contains("git pre-push hook"), "{text}");
 }

@@ -37,6 +37,14 @@ pub fn run() -> i32 {
         None => r.bad("`stele` not on PATH — every generated hook invokes it by name"),
     }
 
+    // bash is the runtime every rule check and generated hook (pre-push,
+    // Hermes shim) executes through. Without it nothing can fire — on Windows
+    // that means running under WSL or Git Bash.
+    match version_of("bash", &["--version"]) {
+        Some(v) => r.ok(&format!("bash: {v}")),
+        None => r.bad("bash not found — rule checks and generated hooks run through it (Windows: use WSL or Git Bash)"),
+    }
+
     let cwd = std::env::current_dir().unwrap_or_default();
     let Ok(root) = substrate::find_root(&cwd) else {
         r.bad("not inside a git repository");
