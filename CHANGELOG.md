@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `[[context]]` providers: a prompt-time channel distinct from rules. Each is a
+  command whose stdout is injected as agent context at prompt/session-start,
+  regardless of any rule's green/red. It never gates, never appears at stop or in
+  CI; the command owns its own relevance and dedup (via `$STELE_CHANGED` and
+  marker files). Fail-open — a malformed provider yields no context, never an error.
+
 ### Safety
 - `stele install global` now refuses when run from inside an agent session
   (`CLAUDECODE`/`CURSOR_*`/`CODEX_*`), since global hooks activate immediately

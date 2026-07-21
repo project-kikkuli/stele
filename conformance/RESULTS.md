@@ -1,5 +1,16 @@
 # Conformance validation results
 
+## 2026-07-20 — prompt-time context providers
+
+Added a `[[context]]` provider channel: a command run at prompt/session-start
+whose stdout is injected as agent context, independent of any rule's verdict
+(runs even when everything is green; never gates, never at stop or in CI). The
+command owns relevance and dedup via `$STELE_CHANGED` + marker files, so stele
+injects its output verbatim and stays silent when it prints nothing. Ported from
+the august/auth-plane intent-hook's prompt-mode plank-context injection, which
+had no equivalent in stele's pass/fail rule model. Covered by
+`context_provider_injects_at_prompt_but_not_at_stop`.
+
 ## 2026-07-17 — Hermes shim carries no runtime dependencies
 
 The generated Hermes shim is now a bare `exec stele hook hermes pre_tool_call

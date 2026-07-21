@@ -68,11 +68,12 @@ fn run_inner(harness_name: &str, event: &str, scope: config::LoadScope) -> Resul
 
     match event {
         e if event_is_stop(e) => handle_stop(harness, event, &state, &policy_signature, &verdict),
-        "prompt" | "user-prompt-submit" => {
-            handle_prompt(harness, event, &state, &policy_signature, &verdict)
-        }
-        "session-start" | "SessionStart" => {
-            handle_prompt(harness, event, &state, &policy_signature, &verdict)
+        "prompt" | "user-prompt-submit" | "session-start" | "SessionStart" => {
+            // Rule findings (nudges/blocks) and context providers are independent
+            // prompt-time channels: the latter injects even when every rule is
+            // green, so run both and let the harness concatenate their stdout.
+            let _ = handle_prompt(harness, event, &state, &policy_signature, &verdict);
+            handle_context(harness, event, &sub, scope)
         }
         "pre-tool-use" | "pre_tool_call" => handle_toolgate(
             harness,
@@ -194,6 +195,51 @@ fn handle_prompt(
     };
     println!("{}", emit::lifecycle_context(harness, event, &text));
     Ok(0)
+}
+
+/// Prompt-time context providers: run each configured `[[context]]` command and
+/// inject its stdout as agent context. No pass/fail, no gating, no stele-side
+/// speak-once — a provider owns its own relevance and dedup (via `$STELE_CHANGED`
+/// and marker files), so an idle/reconciled provider simply prints nothing.
+fn handle_context(
+    harness: Harness,
+    event: &str,
+    sub: &crate::substrate::Substrate,
+    scope: config::LoadScope,
+) -> Result<i32, String> {
+    let providers = config::load_context(&sub.root, scope);
+    let mut blocks: Vec<String> = Vec::new();
+    for provider in providers {
+        if let Some(text) = run_context_command(&provider.command, sub) {
+            let text = text.trim_end();
+            if !text.is_empty() {
+                blocks.push(text.to_string());
+            }
+        }
+    }
+    if blocks.is_empty() {
+        return Ok(0);
+    }
+    println!(
+        "{}",
+        emit::lifecycle_context(harness, event, &blocks.join("\n"))
+    );
+    Ok(0)
+}
+
+fn run_context_command(command: &str, sub: &crate::substrate::Substrate) -> Option<String> {
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(command)
+        .current_dir(&sub.root)
+        .env("STELE_ROOT", &sub.root)
+        .env("STELE_BASE", sub.base.as_deref().unwrap_or(""))
+        .env("STELE_CHANGED", sub.changed.join("\n"))
+        .output()
+        .ok()?;
+    // Best-effort: inject whatever it printed. A nonzero exit just means "no
+    // context to add" — a provider is not a finding.
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Tool gate. Two duties:

@@ -87,10 +87,23 @@ pub struct Rule {
     pub artifact: Option<Artifact>,
 }
 
+/// A prompt-time context provider: a command whose stdout is injected as agent
+/// context at prompt/session-start time. Unlike a rule it has no pass/fail —
+/// it never gates, never appears at stop or in CI. The command owns its own
+/// relevance and noise control (e.g. filtering on `$STELE_CHANGED`, deduping via
+/// a marker file), which is why stele injects its output verbatim.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ContextProvider {
+    pub id: String,
+    pub command: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct File {
     #[serde(default, rename = "rule")]
     rules: Vec<Rule>,
+    #[serde(default, rename = "context")]
+    context: Vec<ContextProvider>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +239,37 @@ pub fn load_scope(root: &Path, scope: LoadScope) -> Result<Vec<Rule>, String> {
     merge_layers(layers(root, scope)?)
 }
 
+/// Prompt-time context providers across the active layers. Best-effort and
+/// fail-open: a malformed or missing config yields no providers rather than an
+/// error, because context injection must never break a session.
+pub fn load_context(root: &Path, scope: LoadScope) -> Vec<ContextProvider> {
+    let mut paths = Vec::new();
+    if scope != LoadScope::Repository && !global_disabled() {
+        paths.push(system_config_path());
+        if let Ok(path) = user_config_path() {
+            paths.push(path);
+        }
+    }
+    if scope != LoadScope::Global {
+        paths.push(repo_config_path(root));
+    }
+    let mut providers = Vec::new();
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(file) = toml::from_str::<File>(&text) else {
+            continue;
+        };
+        for provider in file.context {
+            if !provider.id.is_empty() && !provider.command.is_empty() {
+                providers.push(provider);
+            }
+        }
+    }
+    providers
+}
+
 fn merge_layers(layers: Vec<Layer>) -> Result<Vec<Rule>, String> {
     let mut seen: HashMap<String, PathBuf> = HashMap::new();
     let mut rules = Vec::new();
@@ -248,8 +292,23 @@ fn merge_layers(layers: Vec<Layer>) -> Result<Vec<Rule>, String> {
 fn load_file(path: &Path) -> Result<Vec<Rule>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let file: File = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    if file.rules.is_empty() {
-        return Err(format!("{} defines no [[rule]] entries", path.display()));
+    if file.rules.is_empty() && file.context.is_empty() {
+        return Err(format!(
+            "{} defines no [[rule]] or [[context]] entries",
+            path.display()
+        ));
+    }
+    for provider in &file.context {
+        if provider.id.is_empty() {
+            return Err(format!("{}: every [[context]] needs an id", path.display()));
+        }
+        if provider.command.is_empty() {
+            return Err(format!(
+                "{}: context {}: `command` is required",
+                path.display(),
+                provider.id
+            ));
+        }
     }
     let mut seen: HashSet<&str> = HashSet::new();
     for rule in &file.rules {

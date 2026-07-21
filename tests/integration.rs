@@ -1783,6 +1783,29 @@ fn hermes_gate_fails_open_with_an_explicit_allow_outside_a_repo() {
     assert_eq!(code, 0, "fail-open exit: {code}");
 }
 
+#[test]
+fn context_provider_injects_at_prompt_but_not_at_stop() {
+    let (_tmp, root) = fixture();
+    let mut cfg = fs::read_to_string(root.join("stele.toml")).unwrap();
+    cfg.push_str(
+        "\n[[context]]\nid = \"ctx\"\ncommand = \"printf 'CTX %s' \\\"$STELE_CHANGED\\\"\"\n",
+    );
+    fs::write(root.join("stele.toml"), cfg).unwrap();
+    fs::write(root.join("app.py"), "x = 2\n").unwrap();
+
+    let payload = format!(r#"{{"cwd":"{}"}}"#, root.display());
+    // Prompt time: the provider runs and its stdout is injected, with the
+    // change-set handed to it via $STELE_CHANGED.
+    let (out, code) = run_hook(&root, "claude", "prompt", &payload);
+    assert_eq!(code, 0);
+    assert!(out.contains("CTX"), "context not injected: {out}");
+    assert!(out.contains("app.py"), "$STELE_CHANGED not passed: {out}");
+
+    // Stop time: context is a prompt-only channel — never injected here.
+    let (out, _) = run_hook(&root, "claude", "stop", &payload);
+    assert!(!out.contains("CTX"), "context must not fire at stop: {out}");
+}
+
 // ------------------------------------------------------------ ci generation
 
 #[test]
