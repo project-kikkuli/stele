@@ -113,6 +113,113 @@ check = "true"
     assert!(error.contains("cannot be combined"), "{error}");
 }
 
+#[test]
+fn config_parses_semantic_rule_and_judges() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("stele.toml"),
+        r#"
+[[judge]]
+name = "local"
+command = "true"
+
+[[rule]]
+id = "no-slop"
+severity = "nudge"
+[rule.semantic]
+prompt = "flag slop"
+cases = ".stele/evals/no-slop.jsonl"
+models = ["local"]
+"#,
+    )
+    .unwrap();
+    let rules = config::load_repo(tmp.path()).unwrap();
+    let sem = rules[0].semantic.as_ref().expect("semantic parsed");
+    assert_eq!(sem.samples, 3, "samples defaults to 3");
+    assert_eq!(sem.models, vec!["local"]);
+    let judges = config::load_judges(tmp.path(), config::LoadScope::Repository);
+    assert_eq!(judges[0].name, "local");
+}
+
+#[test]
+fn config_rejects_semantic_combined_with_check() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("stele.toml"),
+        r#"
+[[rule]]
+id = "bad"
+check = "true"
+[rule.semantic]
+prompt = "x"
+cases = "c.jsonl"
+models = ["m"]
+"#,
+    )
+    .unwrap();
+    assert!(config::load_repo(tmp.path())
+        .unwrap_err()
+        .contains("exactly one"));
+}
+
+#[test]
+fn eval_scores_semantic_rule_and_gates_on_the_verdict() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    sh(root, "git init -q -b main");
+    fs::create_dir_all(root.join(".stele/evals")).unwrap();
+    // One correction: the ticket must go, the code must stay.
+    fs::write(
+        root.join(".stele/evals/c.jsonl"),
+        "{\"id\":\"c1\",\"before\":\"# TODO(ENG-1)\\nx = 1\",\"removed\":[\"ENG-1\"],\"kept\":[\"x = 1\"]}\n",
+    )
+    .unwrap();
+    // Two fixed judges: one returns the surgical fix, one leaves the slop in.
+    fs::write(
+        root.join("stele.toml"),
+        r#"
+[[judge]]
+name = "good"
+command = 'printf "<<<REWRITE\nx = 1\nREWRITE>>>\n"'
+[[judge]]
+name = "bad"
+command = 'printf "<<<REWRITE\n# TODO(ENG-1)\nx = 1\nREWRITE>>>\n"'
+
+[[rule]]
+id = "passes"
+severity = "block"
+[rule.semantic]
+prompt = "remove slop"
+cases = ".stele/evals/c.jsonl"
+models = ["good"]
+samples = 1
+
+[[rule]]
+id = "fails"
+severity = "block"
+[rule.semantic]
+prompt = "remove slop"
+cases = ".stele/evals/c.jsonl"
+models = ["bad"]
+samples = 1
+"#,
+    )
+    .unwrap();
+
+    let eval = |id: &str| {
+        Command::new(env!("CARGO_BIN_EXE_stele"))
+            .args(["eval", id])
+            .current_dir(root)
+            .output()
+            .unwrap()
+    };
+    let good = eval("passes");
+    assert_eq!(good.status.code(), Some(0), "a reproduced correction proves the rule");
+    assert!(String::from_utf8_lossy(&good.stdout).contains("proven"));
+    let bad = eval("fails");
+    assert_eq!(bad.status.code(), Some(1), "a rule the judge can't satisfy must gate");
+}
+
 // ----------------------------------------------------------------- rules
 
 fn artifact_rule(scope: Vec<String>) -> Rule {
@@ -134,6 +241,7 @@ fn artifact_rule(scope: Vec<String>) -> Rule {
             ],
             nonempty_sections: false,
         }),
+        semantic: None,
     }
 }
 
@@ -217,6 +325,7 @@ fn command_rule_distinguishes_red_from_unmeasurable() {
         id: "cmd".into(),
         check: Some("echo '✗ nope'; exit 1".into()),
         artifact: None,
+        semantic: None,
         description: String::new(),
         severity: Severity::Block,
         trigger: Trigger::Changes,

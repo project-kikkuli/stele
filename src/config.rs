@@ -43,12 +43,66 @@ pub struct Artifact {
     pub nonempty_sections: bool,
 }
 
+fn default_samples() -> u32 {
+    3
+}
+
+fn default_block_bar() -> f64 {
+    0.9
+}
+
+fn default_nudge_bar() -> f64 {
+    0.6
+}
+
+/// A rule whose verdict is a judgment, not a shell exit — "no slop comments",
+/// "comments pass the sally-anne test". A deterministic check is exact and needs
+/// no eval; a semantic rule's correctness lives in `prompt`, which is unfalsifiable
+/// by inspection. So it carries its own eval: `stele eval` runs the prompt across
+/// `models` against held-out corrections in `cases`, and the rule may only enforce
+/// at the strength its weakest measurable model earns (`block_bar` / `nudge_bar`).
+#[derive(Debug, Deserialize, Clone)]
+pub struct Semantic {
+    /// Judge prompt fanned to every model. Blunt, failure-named phrasings port
+    /// across vendors better than elegant principles (see `stele eval`).
+    pub prompt: String,
+    /// Path to the before→after correction cases (JSONL), relative to repo root.
+    pub cases: String,
+    /// Judge names to run, resolved against the configured `[[judge]]` table.
+    pub models: Vec<String>,
+    /// Votes per (model, case); the majority verdict wins. Judges are nondeterministic.
+    #[serde(default = "default_samples")]
+    pub samples: u32,
+    #[serde(default = "default_block_bar")]
+    pub block_bar: f64,
+    #[serde(default = "default_nudge_bar")]
+    pub nudge_bar: f64,
+}
+
+/// A model that can act as a judge. `command` is a shell pipeline that reads the
+/// prompt on stdin and writes the verdict to stdout — stele owns the policy, the
+/// harness owns the invocation, so the fleet is never Claude-only.
+#[derive(Debug, Deserialize, Clone)]
+pub struct Judge {
+    pub name: String,
+    pub command: String,
+}
+
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     #[default]
     Block,
     Nudge,
+}
+
+impl Severity {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Nudge => "nudge",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -85,6 +139,8 @@ pub struct Rule {
     pub check: Option<String>,
     #[serde(default)]
     pub artifact: Option<Artifact>,
+    #[serde(default)]
+    pub semantic: Option<Semantic>,
 }
 
 /// A prompt-time context provider: a command whose stdout is injected as agent
@@ -104,6 +160,8 @@ struct File {
     rules: Vec<Rule>,
     #[serde(default, rename = "context")]
     context: Vec<ContextProvider>,
+    #[serde(default, rename = "judge")]
+    judges: Vec<Judge>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +328,40 @@ pub fn load_context(root: &Path, scope: LoadScope) -> Vec<ContextProvider> {
     providers
 }
 
+/// Judges across the active layers, later layers overriding earlier ones by name
+/// so a repository can retarget a personal judge. Fail-open like [`load_context`].
+pub fn load_judges(root: &Path, scope: LoadScope) -> Vec<Judge> {
+    let mut paths = Vec::new();
+    if scope != LoadScope::Repository && !global_disabled() {
+        paths.push(system_config_path());
+        if let Ok(path) = user_config_path() {
+            paths.push(path);
+        }
+    }
+    if scope != LoadScope::Global {
+        paths.push(repo_config_path(root));
+    }
+    let mut by_name: HashMap<String, Judge> = HashMap::new();
+    let mut order = Vec::new();
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(file) = toml::from_str::<File>(&text) else {
+            continue;
+        };
+        for judge in file.judges {
+            if judge.name.is_empty() || judge.command.is_empty() {
+                continue;
+            }
+            if by_name.insert(judge.name.clone(), judge.clone()).is_none() {
+                order.push(judge.name);
+            }
+        }
+    }
+    order.into_iter().filter_map(|n| by_name.remove(&n)).collect()
+}
+
 fn merge_layers(layers: Vec<Layer>) -> Result<Vec<Rule>, String> {
     let mut seen: HashMap<String, PathBuf> = HashMap::new();
     let mut rules = Vec::new();
@@ -322,9 +414,12 @@ fn load_file(path: &Path) -> Result<Vec<Rule>, String> {
                 rule.id
             ));
         }
-        if rule.check.is_some() == rule.artifact.is_some() {
+        let kinds = rule.check.is_some() as u8
+            + rule.artifact.is_some() as u8
+            + rule.semantic.is_some() as u8;
+        if kinds != 1 {
             return Err(format!(
-                "{}: rule {}: exactly one of `check` or `[rule.artifact]` is required",
+                "{}: rule {}: exactly one of `check`, `[rule.artifact]`, or `[rule.semantic]` is required",
                 path.display(),
                 rule.id
             ));
