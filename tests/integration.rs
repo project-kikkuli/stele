@@ -1688,6 +1688,45 @@ fn loop_guard_exits_are_logged() {
     );
 }
 
+/// Several hooks can append at once (multiple harnesses, or a stop racing a
+/// tool gate in one session). Every record must land whole: one line, one
+/// parseable object, nothing shredded into its neighbour.
+#[test]
+fn concurrent_appends_never_interleave_records() {
+    let tmp = TempDir::new().unwrap();
+    let git_dir = tmp.path().join(".git");
+    fs::create_dir_all(&git_dir).unwrap();
+
+    const WRITERS: usize = 8;
+    const PER_WRITER: usize = 40;
+    let threads: Vec<_> = (0..WRITERS)
+        .map(|w| {
+            let git_dir = git_dir.clone();
+            std::thread::spawn(move || {
+                let state = stele::engine::State::at(git_dir);
+                for i in 0..PER_WRITER {
+                    state.log_event("claude-code", "stop", "green", &format!("w{w}-{i}"));
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+
+    let events = fs::read_to_string(git_dir.join("stele/events.jsonl")).unwrap();
+    let lines: Vec<&str> = events.lines().collect();
+    assert_eq!(
+        lines.len(),
+        WRITERS * PER_WRITER,
+        "every record must be exactly one line"
+    );
+    for line in &lines {
+        serde_json::from_str::<serde_json::Value>(line)
+            .unwrap_or_else(|e| panic!("corrupt record: {e}\n{line}"));
+    }
+}
+
 #[test]
 fn iso_timestamps() {
     let ts = stele::engine::iso_now();
