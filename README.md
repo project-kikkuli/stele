@@ -154,6 +154,28 @@ Two kinds:
 precondition that also runs on clean trees. `acknowledge = false` makes an
 invariant ineligible for `stele ack`.
 
+## Shipping stele to a team
+
+Generated hooks get committed; the binary does not. So every generated local
+channel first tests for stele and exits 0 (silent allow) when it is missing — a
+teammate who has not installed it gets silence, not a hook failure on every
+event. CI is deliberately exempt: there, a missing stele fails loud.
+
+That makes adoption incremental. Commit the wiring, let people install stele
+when they choose, and CI holds the line for everyone either way.
+
+To ship stele inside the project's own toolchain rather than depending on each
+teammate's `PATH`, name it in `stele.toml`:
+
+```toml
+binary = "node_modules/.bin/stele"
+```
+
+Every generated channel then calls that path. `STELE_BIN` overrides it for a
+single `stele compile` run. Hook ownership is tracked by the argument tail, so
+switching binaries rewrites the existing hooks instead of appending a second
+set — and hooks written by earlier versions migrate in place.
+
 ## Noise economics
 
 Credibility is the whole game: a gate that nags gets disabled. The engine is
