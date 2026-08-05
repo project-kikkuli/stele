@@ -7,8 +7,8 @@ whose stdout is injected as agent context, independent of any rule's verdict
 (runs even when everything is green; never gates, never at stop or in CI). The
 command owns relevance and dedup via `$STELE_CHANGED` + marker files, so stele
 injects its output verbatim and stays silent when it prints nothing. Ported from
-the august/auth-plane intent-hook's prompt-mode plank-context injection, which
-had no equivalent in stele's pass/fail rule model. Covered by
+a production intent-hook's prompt-mode context injection, which had no
+equivalent in stele's pass/fail rule model. Covered by
 `context_provider_injects_at_prompt_but_not_at_stop`.
 
 ## 2026-07-17 — Hermes shim carries no runtime dependencies
@@ -169,8 +169,8 @@ Instrumented hook logs every invocation to `.stele/events.jsonl`.
    Claude Code adapter. Cloud Devin sessions: no hooks documented; channel is
    snapshot-installed git hooks + API send-message (the synthesized loop,
    delivered async by a watcher).
-10. **Cloud Devin message channel: validated live** (session 731273ad, org
-   august-innovations, scratch task, no repo/PR). Devin received the exact
+10. **Cloud Devin message channel: validated live** (scratch task, no repo/PR).
+   Devin received the exact
    stele block text mid-session and produced a schema-perfect requirements.md,
    then stopped ("I need to stop now as instructed"). Caveats: (a) a message
    sent right after Devin stops sat unprocessed for ~7 minutes; a second short
