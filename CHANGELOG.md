@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `[rule.semantic]`: a third rule kind, judged by a model, for invariants no
+  script can express ("no slop comments"). Its correctness lives in its prompt,
+  so it ships with its own eval: `stele eval <rule-id>` runs the prompt across
+  the configured `[[judge]]` fleet against held-out before→after corrections.
+  Scoring the resulting edit rather than the flag credits a judge that flags a
+  whole comment but rewrites it to the intended surgical cut. A rule may only
+  enforce at the severity its weakest *measurable* vendor earns; a vendor with
+  no gradeable output is a coverage gap (exit 3), not a zero. Judges are config,
+  not hardcoded, so the fleet is never Claude-only.
 - `binary` key in `stele.toml` (and a `STELE_BIN` override): the path generated
   hooks should invoke, for projects that ship stele inside their own toolchain
   (`node_modules/.bin/stele`, a vendored release) rather than depending on every

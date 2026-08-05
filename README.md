@@ -142,17 +142,58 @@ in [`conformance/RESULTS.md`](conformance/RESULTS.md).
 
 ## Rules
 
-Two kinds:
+Three kinds:
 
 - **artifact** — a file must exist with required sections (shown above).
 - **command** — any script: exit 0 green; nonzero red with findings on stdout.
   Receives `STELE_ROOT`, `STELE_BASE`, `STELE_CHANGED` (newline-separated
   change-set) and must be a pure function of them.
+- **semantic** — judged by a model, for the rules no script can express ("no
+  slop comments"). Carries its own eval; see below.
 
 `scope` globs (with `!` excludes) gate when a rule triggers; `severity =
 "nudge"` speaks once but never blocks. `trigger = "always"` defines a session
 precondition that also runs on clean trees. `acknowledge = false` makes an
 invariant ineligible for `stele ack`.
+
+## Semantic rules and `stele eval`
+
+A deterministic rule is exact and needs no eval. A semantic rule's correctness
+lives in its **prompt** — which can be phrased wrong and still look fine by
+inspection. So a semantic rule ships with the evidence that its prompt works:
+
+```toml
+[[judge]]
+name = "claude"
+command = "claude -p"        # prompt on stdin, verdict on stdout
+
+[[rule]]
+id = "no-slop-comments"
+severity = "nudge"
+
+[rule.semantic]
+prompt = "Remove comments that restate the code."
+cases = "evals/slop.jsonl"   # held-out before→after corrections
+models = ["claude"]
+samples = 3                  # votes per (model, case); majority wins
+```
+
+```console
+$ stele eval no-slop-comments
+```
+
+Judges are config, not hardcoded — the fleet is whatever `[[judge]]` lists, so
+this is never Claude-only. Cases are before→after: the judge rewrites the code
+and passes when every `removed` fragment is gone and every kept fragment
+survives. Scoring the **edit** rather than the flag credits a judge that flags a
+whole comment but rewrites it to the intended surgical cut.
+
+A rule may only enforce at the severity its weakest *measurable* vendor earns.
+A vendor that produces no gradeable output is a coverage gap, not a zero — exit
+3, the same "couldn't measure" that CI already refuses to read as green.
+
+Exit codes: `0` proven at the declared severity, `1` doesn't hold, `3` fleet not
+fully measurable.
 
 ## Shipping stele to a team
 

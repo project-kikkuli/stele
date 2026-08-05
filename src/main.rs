@@ -1,5 +1,5 @@
 use stele::{
-    ack, compile, config, conformance, devin, doctor, engine, hook, launch, substrate, wrap,
+    ack, compile, config, conformance, devin, doctor, engine, eval, hook, launch, substrate, wrap,
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -73,6 +73,13 @@ enum Cmd {
         /// Agent command, after `--` (e.g. cursor-agent -p --force).
         #[arg(last = true)]
         cmd: Vec<String>,
+    },
+    /// Score a `[rule.semantic]` rule against its held-out corrections across the
+    /// judge fleet. Exit: 0 proven at declared severity · 1 doesn't hold · 3 fleet
+    /// not fully measurable.
+    Eval {
+        /// Id of the semantic rule to score.
+        rule_id: String,
     },
     /// Fan stele.toml out to every delivery channel (idempotent, merge-safe).
     Compile,
@@ -230,6 +237,7 @@ fn main() -> ExitCode {
             max_loops,
             cmd,
         } => ExitCode::from(wrap::run(max_loops, &prompt, &cmd) as u8),
+        Cmd::Eval { rule_id } => ExitCode::from(eval::run(&rule_id)),
         Cmd::Compile => run_compile(),
         Cmd::Install { harness, yes } => run_install(&harness, yes),
         Cmd::Uninstall { harness, purge } => run_uninstall(&harness, purge),
