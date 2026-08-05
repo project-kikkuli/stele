@@ -3,14 +3,16 @@
 //! run git themselves — every environment-variance bug (cwd, worktrees, merge
 //! parents) gets fixed here or nowhere.
 //!
-//! Mechanism (ported from august's battle-tested intent-hook):
+//! Mechanism (ported from a battle-tested production intent-hook):
 //! 1. Snapshot the worktree — uncommitted AND untracked — into a throwaway
 //!    tree via a temp index, with snapshot objects written to a temp object
 //!    directory (the repo's own object store never sees a snapshot blob).
 //! 2. Parent a throwaway commit on HEAD *and every MERGE_HEAD*, so during an
 //!    in-progress merge the three-dot diff resolves its base against the
 //!    mainline tip and incoming mainline content is NOT attributed to this
-//!    session's change-set (august bugs #12886/#12905).
+//!    session's change-set. This is not hypothetical: mis-attributed merges
+//!    were the single most common source of false findings in production,
+//!    twice over, before the snapshot was parented this way.
 //! 3. change-set = `git diff --name-only base...snapshot`;
 //!    signature = the snapshot tree hash + base (content-exact, cheap).
 
@@ -77,7 +79,8 @@ pub fn find_git_dir(root: &Path) -> Result<PathBuf, String> {
 /// the three-dot diff must re-resolve its merge-base against the mainline TIP
 /// so that a snapshot parented on MERGE_HEAD excludes incoming mainline work.
 /// Using the precomputed merge-base commit there would resolve to the old
-/// fork point and re-attribute the whole merge (the august #12886 bug).
+/// fork point and re-attribute the whole merge — a false-finding bug found in
+/// production, and the reason this function returns a REF rather than a commit.
 fn resolve_base(root: &Path) -> Option<(String, String)> {
     let has_head = !git_ok(root, &["rev-parse", "--verify", "-q", "HEAD"])
         .trim()
