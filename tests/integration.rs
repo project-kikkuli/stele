@@ -456,6 +456,10 @@ fn compile_writes_all_channels_and_is_idempotent() {
         again.is_empty(),
         "second compile must be a no-op, wrote {again:?}"
     );
+    // CI is the unbypassable terminus: it must NOT tolerate a missing binary
+    // the way the local channels do.
+    let ci = fs::read_to_string(root.join(".github/workflows/stele.yml")).unwrap();
+    assert!(!ci.contains("command -v"), "CI must fail loud: {ci}");
     let codex = fs::read_to_string(root.join(".codex/hooks.json")).unwrap();
     assert!(codex.contains("session-start --scope repo"), "{codex}");
     assert!(codex.contains("pre-tool-use --scope repo"), "{codex}");
@@ -466,6 +470,108 @@ fn compile_writes_all_channels_and_is_idempotent() {
         pre_push.contains("stele check --quiet-green --scope repo"),
         "{pre_push}"
     );
+}
+
+/// Generated hooks are committed but the binary is not. A teammate without
+/// stele installed must get silence, not a hook failure on every event — that
+/// is how a team decides to delete the wiring. CI is exempt: it fails loud.
+#[test]
+fn generated_hooks_are_silent_no_ops_when_stele_is_not_installed() {
+    let (_tmp, root) = fixture();
+    let rules = config::load_repo(&root).unwrap();
+    stele::compile::run(&root, &rules).unwrap();
+
+    // An empty PATH is the "not installed" case for every generated channel.
+    // `bash` is invoked by absolute path so the harness itself still resolves.
+    let run_isolated = |script: &str| -> std::process::Output {
+        Command::new("/bin/bash")
+            .arg("-c")
+            .arg(script)
+            .current_dir(&root)
+            .env("PATH", "")
+            .output()
+            .unwrap()
+    };
+
+    let claude: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    let stop = claude["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let out = run_isolated(stop);
+    assert!(
+        out.status.success(),
+        "hook must exit 0 without stele: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "silence is allow: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // Pre-push must let the push through; CI still holds the line.
+    let out = run_isolated("/bin/bash .git/hooks/pre-push");
+    assert!(out.status.success(), "pre-push must not block without stele");
+
+    // Hermes reads empty stdout as undefined, so its shim owes an explicit
+    // allow even when stele is absent.
+    let out = run_isolated("/bin/bash .stele/hermes-shim.sh");
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "{}",
+        "hermes needs an explicit allow"
+    );
+}
+
+/// `binary` lets a project ship stele inside its own toolchain (a pnpm
+/// devDependency, a vendored release) instead of depending on every
+/// teammate's PATH.
+#[test]
+fn configured_binary_is_used_by_every_generated_channel() {
+    let (_tmp, root) = fixture();
+    let existing = fs::read_to_string(root.join("stele.toml")).unwrap();
+    fs::write(
+        root.join("stele.toml"),
+        format!("binary = \"node_modules/.bin/stele\"\n{existing}"),
+    )
+    .unwrap();
+    let rules = config::load_repo(&root).unwrap();
+    stele::compile::run(&root, &rules).unwrap();
+
+    for channel in [
+        ".claude/settings.json",
+        ".codex/hooks.json",
+        ".cursor/hooks.json",
+        ".stele/hermes-shim.sh",
+        ".git/hooks/pre-push",
+    ] {
+        let body = fs::read_to_string(root.join(channel)).unwrap();
+        assert!(
+            body.contains("node_modules/.bin/stele"),
+            "{channel} ignored the configured binary: {body}"
+        );
+    }
+
+    // Ownership is tracked by the argument tail, so a repo that switches
+    // binaries replaces its hooks rather than accumulating a second set.
+    fs::write(
+        root.join("stele.toml"),
+        format!("binary = \"vendor/stele\"\n{existing}"),
+    )
+    .unwrap();
+    stele::compile::run(&root, &rules).unwrap();
+    let claude: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    let stops = claude["hooks"]["Stop"].as_array().unwrap();
+    assert_eq!(stops.len(), 1, "switching binary must replace, not append");
+    assert!(stops[0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .contains("vendor/stele"));
 }
 
 #[test]
@@ -606,7 +712,7 @@ fn global_install_preserves_user_config_migrates_old_hooks_and_is_idempotent() {
     assert_eq!(stops.len(), 1, "stale Stele hook must be replaced");
     assert_eq!(
         stops[0]["hooks"][0]["command"],
-        "stele hook claude-code stop --scope global"
+        "command -v stele >/dev/null 2>&1 || exit 0; stele hook claude-code stop --scope global"
     );
     assert_eq!(claude["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
     assert_eq!(claude["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
@@ -1795,6 +1901,45 @@ fn loop_guard_exits_are_logged() {
         events.contains("loop-guard"),
         "guard exits must appear in telemetry: {events}"
     );
+}
+
+/// Several hooks can append at once (multiple harnesses, or a stop racing a
+/// tool gate in one session). Every record must land whole: one line, one
+/// parseable object, nothing shredded into its neighbour.
+#[test]
+fn concurrent_appends_never_interleave_records() {
+    let tmp = TempDir::new().unwrap();
+    let git_dir = tmp.path().join(".git");
+    fs::create_dir_all(&git_dir).unwrap();
+
+    const WRITERS: usize = 8;
+    const PER_WRITER: usize = 40;
+    let threads: Vec<_> = (0..WRITERS)
+        .map(|w| {
+            let git_dir = git_dir.clone();
+            std::thread::spawn(move || {
+                let state = stele::engine::State::at(git_dir);
+                for i in 0..PER_WRITER {
+                    state.log_event("claude-code", "stop", "green", &format!("w{w}-{i}"));
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+
+    let events = fs::read_to_string(git_dir.join("stele/events.jsonl")).unwrap();
+    let lines: Vec<&str> = events.lines().collect();
+    assert_eq!(
+        lines.len(),
+        WRITERS * PER_WRITER,
+        "every record must be exactly one line"
+    );
+    for line in &lines {
+        serde_json::from_str::<serde_json::Value>(line)
+            .unwrap_or_else(|e| panic!("corrupt record: {e}\n{line}"));
+    }
 }
 
 #[test]

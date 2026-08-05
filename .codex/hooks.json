@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "stele hook codex pre-tool-use --scope repo",
+            "command": "command -v stele >/dev/null 2>&1 || exit 0; stele hook codex pre-tool-use --scope repo",
             "type": "command"
           }
         ],
@@ -15,7 +15,7 @@
       {
         "hooks": [
           {
-            "command": "stele hook codex session-start --scope repo",
+            "command": "command -v stele >/dev/null 2>&1 || exit 0; stele hook codex session-start --scope repo",
             "type": "command"
           }
         ],
@@ -26,7 +26,7 @@
       {
         "hooks": [
           {
-            "command": "stele hook codex stop --scope repo",
+            "command": "command -v stele >/dev/null 2>&1 || exit 0; stele hook codex stop --scope repo",
             "type": "command"
           }
         ],
@@ -37,7 +37,7 @@
       {
         "hooks": [
           {
-            "command": "stele hook codex prompt --scope repo",
+            "command": "command -v stele >/dev/null 2>&1 || exit 0; stele hook codex prompt --scope repo",
             "type": "command"
           }
         ],

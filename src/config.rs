@@ -32,6 +32,8 @@ pub const CONFIG_NAME: &str = "stele.toml";
 pub const USER_CONFIG_ENV: &str = "STELE_USER_CONFIG";
 pub const SYSTEM_CONFIG_ENV: &str = "STELE_SYSTEM_CONFIG";
 pub const DISABLE_GLOBAL_ENV: &str = "STELE_DISABLE_GLOBAL";
+pub const BINARY_ENV: &str = "STELE_BIN";
+pub const DEFAULT_BINARY: &str = "stele";
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Artifact {
@@ -156,6 +158,12 @@ pub struct ContextProvider {
 
 #[derive(Debug, Deserialize)]
 struct File {
+    /// Path to the stele binary that generated hooks should invoke. Defaults to
+    /// `stele` (resolved on PATH). Set it when stele ships inside the project's
+    /// own toolchain — `node_modules/.bin/stele`, a vendored release — so the
+    /// generated hooks do not depend on every teammate's PATH.
+    #[serde(default)]
+    binary: Option<String>,
     #[serde(default, rename = "rule")]
     rules: Vec<Rule>,
     #[serde(default, rename = "context")]
@@ -238,6 +246,29 @@ pub fn system_config_path() -> PathBuf {
         }
     }
     PathBuf::from("/etc/stele").join(CONFIG_NAME)
+}
+
+/// The binary name generated hooks should call, for the config file at `path`.
+///
+/// `STELE_BIN` wins (a one-off override for a compile run), then the config's
+/// own `binary` key (durable, committed alongside the rules), then `stele` on
+/// PATH. Read best-effort: an unreadable or malformed config yields the
+/// default, because `stele compile` reports that failure through its own
+/// loader rather than here.
+pub fn hook_binary(path: &Path) -> String {
+    if let Ok(bin) = std::env::var(BINARY_ENV) {
+        let bin = bin.trim();
+        if !bin.is_empty() {
+            return bin.to_string();
+        }
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<File>(&text).ok())
+        .and_then(|file| file.binary)
+        .map(|bin| bin.trim().to_string())
+        .filter(|bin| !bin.is_empty())
+        .unwrap_or_else(|| DEFAULT_BINARY.to_string())
 }
 
 fn global_disabled() -> bool {

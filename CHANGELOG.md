@@ -7,6 +7,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `binary` key in `stele.toml` (and a `STELE_BIN` override): the path generated
+  hooks should invoke, for projects that ship stele inside their own toolchain
+  (`node_modules/.bin/stele`, a vendored release) rather than depending on every
+  teammate's `PATH`. Hook ownership is now tracked by the argument tail, so
+  switching binaries rewrites the existing hooks rather than appending a second
+  set, and hooks written by earlier versions migrate in place.
+
+### Changed
+- Every generated local channel — agent hooks, the Hermes shim, git pre-push —
+  now tests for the stele binary and exits 0 (silent allow) when it is absent.
+  Committed hooks no longer fail on the machine of a teammate who has not
+  installed stele, which makes partial adoption survivable. CI is deliberately
+  exempt and still fails loud. The Hermes shim emits its explicit `{}` allow in
+  the not-installed case, since Hermes reads empty stdout as undefined.
+
+### Fixed
+- Telemetry records are written with a single `write(2)`. `writeln!` routed
+  through `write_fmt`, and serde_json's `Display` serializes token by token, so
+  one event became dozens of small appends — concurrent hooks interleaved
+  mid-record and shredded each other's lines in `events.jsonl`.
+
+### Added (earlier)
 - `[[context]]` providers: a prompt-time channel distinct from rules. Each is a
   command whose stdout is injected as agent context at prompt/session-start,
   regardless of any rule's green/red. It never gates, never appears at stop or in

@@ -3,7 +3,7 @@
     {
       "hooks": [
         {
-          "command": "stele hook devin-cli pre-tool-use --scope repo",
+          "command": "command -v stele >/dev/null 2>&1 || exit 0; stele hook devin-cli pre-tool-use --scope repo",
           "type": "command"
         }
       ],
@@ -14,7 +14,7 @@
     {
       "hooks": [
         {
-          "command": "stele hook devin-cli session-start --scope repo",
+          "command": "command -v stele >/dev/null 2>&1 || exit 0; stele hook devin-cli session-start --scope repo",
           "type": "command"
         }
       ],
@@ -25,7 +25,7 @@
     {
       "hooks": [
         {
-          "command": "stele hook devin-cli stop --scope repo",
+          "command": "command -v stele >/dev/null 2>&1 || exit 0; stele hook devin-cli stop --scope repo",
           "type": "command"
         }
       ],
@@ -36,7 +36,7 @@
     {
       "hooks": [
         {
-          "command": "stele hook devin-cli prompt --scope repo",
+          "command": "command -v stele >/dev/null 2>&1 || exit 0; stele hook devin-cli prompt --scope repo",
           "type": "command"
         }
       ],

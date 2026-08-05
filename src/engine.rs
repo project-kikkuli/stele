@@ -185,6 +185,13 @@ impl State {
     /// Telemetry: every hook invocation appends one JSONL record — including
     /// loop-guard exits, so retries never vanish from the count. This is the
     /// data that later answers "which layer catches what, per harness".
+    ///
+    /// Concurrent hooks (several harnesses, or a stop and a tool gate racing in
+    /// one session) append to this file at once, so the record and its newline
+    /// must reach the kernel as **one** `write(2)`. `writeln!` issues a separate
+    /// write per format piece, which lets two processes interleave mid-record
+    /// and shred both lines. Serialize first, write once: with `O_APPEND` a
+    /// single small write is atomic against other appenders.
     pub fn log_event(&self, harness: &str, event: &str, verdict: &str, detail: &str) {
         let record = json!({
             "ts": iso_now(),
@@ -193,10 +200,11 @@ impl State {
             "verdict": verdict,
             "detail": detail,
         });
+        let line = format!("{record}\n");
         let path = self.dir.join("events.jsonl");
         if let Ok(mut existing) = fs::OpenOptions::new().create(true).append(true).open(path) {
             use std::io::Write;
-            let _ = writeln!(existing, "{record}");
+            let _ = existing.write_all(line.as_bytes());
         }
     }
 }
