@@ -6,5 +6,6 @@
 These rules are *measured*, not advisory: hooks block your finish, git hooks block pushes, and CI blocks merges until they pass. Run `stele check` any time to see where you stand.
 
 - **tests-move-with-src**: engine changes ship with test changes
+- **no-identifying-strings**: this repository is public; identifying strings must not enter it
 - **conformance-results-current**: channel-behavior changes update the empirical record
 <!-- stele:end -->

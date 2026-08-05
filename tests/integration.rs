@@ -2087,3 +2087,138 @@ fn generated_ci_self_hosts_in_stele_and_installs_stele_not_the_consumer_repo() {
     );
     assert!(!wf2.contains("acme/widgets"), "{wf2}");
 }
+
+// -------------------------------------------- this repo's own leak guard
+
+/// `scripts/no-identifying-strings.sh` backs this repository's
+/// `no-identifying-strings` rule. It is the one check whose failure mode is
+/// silent: a broken script exits 0 and every leak sails through, so its
+/// behavior is pinned here rather than trusted.
+#[test]
+fn leak_guard_catches_identifying_strings_and_stays_quiet_otherwise() {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts/no-identifying-strings.sh");
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join(".stele")).unwrap();
+
+    let run = |changed: &str| -> std::process::Output {
+        Command::new("bash")
+            .arg(&script)
+            .current_dir(root)
+            .env("STELE_ROOT", root)
+            .env("STELE_CHANGED", changed)
+            .output()
+            .unwrap()
+    };
+
+    // Structural patterns ship in the script, so they hold with no private list.
+    fs::write(root.join("clean.rs"), "fn main() {}\n").unwrap();
+    assert!(run("clean.rs").status.success(), "clean tree must pass");
+
+    fs::write(root.join("home.rs"), "// see /Users/someone/dev\n").unwrap(); // leak-guard-ok
+    let out = run("home.rs");
+    assert!(!out.status.success(), "absolute home path must be caught");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("/Users/someone")); // leak-guard-ok
+
+    fs::write(root.join("mail.rs"), "// ping someone@example.ai\n").unwrap(); // leak-guard-ok
+    assert!(
+        !run("mail.rs").status.success(),
+        "email address must be caught"
+    );
+
+    // Private names are only known through the gitignored list.
+    fs::write(root.join("named.rs"), "//! ported from privatename\n").unwrap();
+    assert!(
+        run("named.rs").status.success(),
+        "unknown name passes without a private list"
+    );
+    fs::write(
+        root.join(".stele/private-patterns.txt"),
+        "# comment\n\nprivatename\n",
+    )
+    .unwrap();
+    let out = run("named.rs");
+    assert!(!out.status.success(), "private list must be honored");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("privatename"));
+
+    // The list is allowed to contain the strings it forbids.
+    assert!(
+        run(".stele/private-patterns.txt").status.success(),
+        "the pattern file must not flag itself"
+    );
+
+    // Deleted paths stay in the change-set; binaries produce garbage findings.
+    fs::write(root.join("blob.bin"), b"\x00\x01privatename\x00").unwrap();
+    assert!(
+        run("deleted.rs\nblob.bin").status.success(),
+        "deleted and binary files must be skipped"
+    );
+
+    // A finding quotes the match, never the whole line — echoing the line back
+    // would republish the secret into agent context and CI logs.
+    fs::write(
+        root.join("ctx.rs"),
+        "// privatename appears beside other sensitive words here\n",
+    )
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&run("ctx.rs").stdout).into_owned();
+    assert!(stdout.contains("privatename"));
+    assert!(
+        !stdout.contains("beside other sensitive words"),
+        "finding must not echo the surrounding line: {stdout}"
+    );
+}
+
+/// The escape hatches exist so the guard does not cry wolf on the repository it
+/// protects: a marked line is exempt, and `git@host` is an SSH remote rather
+/// than anybody's address.
+#[test]
+fn leak_guard_exempts_marked_lines_and_ssh_remotes() {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts/no-identifying-strings.sh");
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    let run = |changed: &str| -> std::process::Output {
+        Command::new("bash")
+            .arg(&script)
+            .current_dir(root)
+            .env("STELE_ROOT", root)
+            .env("STELE_CHANGED", changed)
+            .output()
+            .unwrap()
+    };
+
+    fs::write(
+        root.join("fixture.rs"),
+        "let p = \"/Users/someone/dev\"; // leak-guard-ok\n",
+    )
+    .unwrap();
+    assert!(
+        run("fixture.rs").status.success(),
+        "a marked line must be exempt"
+    );
+
+    fs::write(
+        root.join("clone.md"),
+        "git clone git@github.com:acme/widgets.git\n",
+    )
+    .unwrap();
+    assert!(
+        run("clone.md").status.success(),
+        "an SSH remote is not an identity"
+    );
+
+    // The marker exempts its own line only, never the whole file.
+    fs::write(
+        root.join("mixed.rs"),
+        "let a = \"/Users/one\"; // leak-guard-ok\nlet b = \"/Users/two\";\n",
+    )
+    .unwrap();
+    let out = run("mixed.rs");
+    assert!(!out.status.success(), "unmarked line must still be caught");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("/Users/two"), "{stdout}");
+    assert!(!stdout.contains("/Users/one"), "{stdout}");
+}

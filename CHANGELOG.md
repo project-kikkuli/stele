@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- This repository now governs itself with a `no-identifying-strings` rule
+  (`scripts/no-identifying-strings.sh`), after identifying strings reached the
+  public tree twice — once on `main`, once on an unmerged branch nobody thought
+  to audit. Patterns split by whether the pattern is itself safe to publish:
+  structural shapes (home paths, email addresses) ship in the script, while
+  names of private codebases live in a gitignored `.stele/private-patterns.txt`
+  — a committed list of those would leak exactly what it exists to catch. A
+  `leak-guard-ok` line marker exempts deliberate fixtures, and `git@host` is
+  treated as an SSH remote rather than an address, because a guard that flags
+  its own test suite is a guard someone deletes.
 - `[rule.semantic]`: a third rule kind, judged by a model, for invariants no
   script can express ("no slop comments"). Its correctness lives in its prompt,
   so it ships with its own eval: `stele eval <rule-id>` runs the prompt across

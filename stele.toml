@@ -9,6 +9,14 @@ check = "printf '%s\n' \"$STELE_CHANGED\" | grep -q '^tests/' || { echo '✗ src
 message = "If this is a pure refactor with no behavior change, `stele ack tests-move-with-src -m \"why\"`."
 
 [[rule]]
+id = "no-identifying-strings"
+description = "this repository is public; identifying strings must not enter it"
+severity = "block"
+acknowledge = false
+check = "bash scripts/no-identifying-strings.sh"
+message = "Rewrite the string generically — the engineering reason usually survives without the name. Private patterns live in .stele/private-patterns.txt (gitignored); structural ones are in the script."
+
+[[rule]]
 id = "conformance-results-current"
 description = "channel-behavior changes update the empirical record"
 severity = "nudge"
